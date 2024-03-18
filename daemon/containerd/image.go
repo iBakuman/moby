@@ -12,15 +12,14 @@ import (
 
 	cerrdefs "github.com/containerd/containerd/errdefs"
 	containerdimages "github.com/containerd/containerd/images"
-	cplatforms "github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/platforms"
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
-	imagetype "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/image"
-	imagespec "github.com/docker/docker/image/spec/specs-go/v1"
-	"github.com/docker/docker/pkg/platforms"
+	imagespec "github.com/moby/docker-image-spec/specs-go/v1"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -32,58 +31,24 @@ var truncatedID = regexp.MustCompile(`^(sha256:)?([a-f0-9]{4,64})$`)
 var errInconsistentData error = errors.New("consistency error: data changed during operation, retry")
 
 // GetImage returns an image corresponding to the image referred to by refOrID.
-func (i *ImageService) GetImage(ctx context.Context, refOrID string, options imagetype.GetImageOpts) (*image.Image, error) {
+func (i *ImageService) GetImage(ctx context.Context, refOrID string, options backend.GetImageOpts) (*image.Image, error) {
 	desc, err := i.resolveImage(ctx, refOrID)
 	if err != nil {
 		return nil, err
 	}
 
-	platform := platforms.AllPlatformsWithPreference(cplatforms.Default())
+	platform := matchAllWithPreference(platforms.Default())
 	if options.Platform != nil {
-		platform = cplatforms.OnlyStrict(*options.Platform)
+		platform = platforms.OnlyStrict(*options.Platform)
 	}
 
-	var presentImages []imagespec.DockerOCIImage
-	err = i.walkImageManifests(ctx, desc, func(img *ImageManifest) error {
-		conf, err := img.Config(ctx)
-		if err != nil {
-			if cerrdefs.IsNotFound(err) {
-				log.G(ctx).WithFields(log.Fields{
-					"manifestDescriptor": img.Target(),
-				}).Debug("manifest was present, but accessing its config failed, ignoring")
-				return nil
-			}
-			return errdefs.System(fmt.Errorf("failed to get config descriptor: %w", err))
-		}
-
-		var ociimage imagespec.DockerOCIImage
-		if err := readConfig(ctx, i.content, conf, &ociimage); err != nil {
-			if cerrdefs.IsNotFound(err) {
-				log.G(ctx).WithFields(log.Fields{
-					"manifestDescriptor": img.Target(),
-					"configDescriptor":   conf,
-				}).Debug("manifest present, but its config is missing, ignoring")
-				return nil
-			}
-			return errdefs.System(fmt.Errorf("failed to read config of the manifest %v: %w", img.Target().Digest, err))
-		}
-		presentImages = append(presentImages, ociimage)
-		return nil
-	})
+	presentImages, err := i.presentImages(ctx, desc, refOrID, platform)
 	if err != nil {
 		return nil, err
 	}
-	if len(presentImages) == 0 {
-		ref, _ := reference.ParseAnyReference(refOrID)
-		return nil, images.ErrImageDoesNotExist{Ref: ref}
-	}
+	ociImage := presentImages[0]
 
-	sort.SliceStable(presentImages, func(i, j int) bool {
-		return platform.Less(presentImages[i].Platform, presentImages[j].Platform)
-	})
-	ociimage := presentImages[0]
-
-	img := dockerOciImageToDockerImagePartial(image.ID(desc.Target.Digest), ociimage)
+	img := dockerOciImageToDockerImagePartial(image.ID(desc.Target.Digest), ociImage)
 
 	parent, err := i.getImageLabelByDigest(ctx, desc.Target.Digest, imageLabelClassicBuilderParent)
 	if err != nil {
@@ -157,13 +122,63 @@ func (i *ImageService) GetImage(ctx context.Context, refOrID string, options ima
 	return img, nil
 }
 
-func (i *ImageService) GetImageManifest(ctx context.Context, refOrID string, options imagetype.GetImageOpts) (*ocispec.Descriptor, error) {
-	platform := platforms.AllPlatformsWithPreference(cplatforms.Default())
-	if options.Platform != nil {
-		platform = cplatforms.Only(*options.Platform)
+// presentImages returns the images that are present in the content store,
+// manifests without a config are ignored.
+// The images are filtered and sorted by platform preference.
+func (i *ImageService) presentImages(ctx context.Context, desc containerdimages.Image, refOrID string, platform platforms.MatchComparer) ([]imagespec.DockerOCIImage, error) {
+	var presentImages []imagespec.DockerOCIImage
+	err := i.walkImageManifests(ctx, desc, func(img *ImageManifest) error {
+		conf, err := img.Config(ctx)
+		if err != nil {
+			if cerrdefs.IsNotFound(err) {
+				log.G(ctx).WithFields(log.Fields{
+					"manifestDescriptor": img.Target(),
+				}).Debug("manifest was present, but accessing its config failed, ignoring")
+				return nil
+			}
+			return errdefs.System(fmt.Errorf("failed to get config descriptor: %w", err))
+		}
+
+		var ociimage imagespec.DockerOCIImage
+		if err := readConfig(ctx, i.content, conf, &ociimage); err != nil {
+			if errdefs.IsNotFound(err) {
+				log.G(ctx).WithFields(log.Fields{
+					"manifestDescriptor": img.Target(),
+					"configDescriptor":   conf,
+				}).Debug("manifest present, but its config is missing, ignoring")
+				return nil
+			}
+			return errdefs.System(fmt.Errorf("failed to read config of the manifest %v: %w", img.Target().Digest, err))
+		}
+
+		if platform.Match(ociimage.Platform) {
+			presentImages = append(presentImages, ociimage)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(presentImages) == 0 {
+		ref, _ := reference.ParseAnyReference(refOrID)
+		return nil, images.ErrImageDoesNotExist{Ref: ref}
 	}
 
-	cs := i.client.ContentStore()
+	sort.SliceStable(presentImages, func(i, j int) bool {
+		return platform.Less(presentImages[i].Platform, presentImages[j].Platform)
+	})
+
+	return presentImages, nil
+}
+
+func (i *ImageService) GetImageManifest(ctx context.Context, refOrID string, options backend.GetImageOpts) (*ocispec.Descriptor, error) {
+	platform := matchAllWithPreference(platforms.Default())
+	if options.Platform != nil {
+		platform = platforms.Only(*options.Platform)
+	}
+
+	cs := i.content
 
 	img, err := i.resolveImage(ctx, refOrID)
 	if err != nil {
@@ -188,9 +203,9 @@ func (i *ImageService) GetImageManifest(ctx context.Context, refOrID string, opt
 
 		if options.Platform != nil {
 			if plat == nil {
-				return nil, errdefs.NotFound(errors.Errorf("image with reference %s was found but does not match the specified platform: wanted %s, actual: nil", refOrID, cplatforms.Format(*options.Platform)))
+				return nil, errdefs.NotFound(errors.Errorf("image with reference %s was found but does not match the specified platform: wanted %s, actual: nil", refOrID, platforms.Format(*options.Platform)))
 			} else if !platform.Match(*plat) {
-				return nil, errdefs.NotFound(errors.Errorf("image with reference %s was found but does not match the specified platform: wanted %s, actual: %s", refOrID, cplatforms.Format(*options.Platform), cplatforms.Format(*plat)))
+				return nil, errdefs.NotFound(errors.Errorf("image with reference %s was found but does not match the specified platform: wanted %s, actual: %s", refOrID, platforms.Format(*options.Platform), platforms.Format(*plat)))
 			}
 		}
 
@@ -219,10 +234,10 @@ func (i *ImageService) GetImageManifest(ctx context.Context, refOrID string, opt
 }
 
 // size returns the total size of the image's packed resources.
-func (i *ImageService) size(ctx context.Context, desc ocispec.Descriptor, platform cplatforms.MatchComparer) (int64, error) {
+func (i *ImageService) size(ctx context.Context, desc ocispec.Descriptor, platform platforms.MatchComparer) (int64, error) {
 	var size int64
 
-	cs := i.client.ContentStore()
+	cs := i.content
 	handler := containerdimages.LimitManifests(containerdimages.ChildrenHandler(cs), platform, 1)
 
 	var wh containerdimages.HandlerFunc = func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
@@ -345,7 +360,7 @@ func (i *ImageService) resolveImage(ctx context.Context, refOrID string) (contai
 // pointing to the same repository as the given reference.
 func (i *ImageService) getAllImagesWithRepository(ctx context.Context, ref reference.Named) ([]containerdimages.Image, error) {
 	nameFilter := "^" + regexp.QuoteMeta(ref.Name()) + ":" + reference.TagRegexp.String() + "$"
-	return i.client.ImageService().List(ctx, "name~="+strconv.Quote(nameFilter))
+	return i.images.List(ctx, "name~="+strconv.Quote(nameFilter))
 }
 
 func imageFamiliarName(img containerdimages.Image) string {
@@ -363,7 +378,7 @@ func imageFamiliarName(img containerdimages.Image) string {
 // targeting the specified digest.
 // If images have different values, an errdefs.Conflict error will be returned.
 func (i *ImageService) getImageLabelByDigest(ctx context.Context, target digest.Digest, labelKey string) (string, error) {
-	imgs, err := i.client.ImageService().List(ctx, "target.digest=="+target.String()+",label."+labelKey)
+	imgs, err := i.images.List(ctx, "target.digest=="+target.String()+",labels."+labelKey)
 	if err != nil {
 		return "", errdefs.System(err)
 	}

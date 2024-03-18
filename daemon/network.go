@@ -305,10 +305,6 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		return nil, errdefs.Forbidden(errors.New(`This node is not a swarm manager. Use "docker swarm init" or "docker swarm join" to connect this node to swarm and try again.`))
 	}
 
-	if network.HasIPv6Subnets(create.IPAM) {
-		create.EnableIPv6 = true
-	}
-
 	networkOptions := make(map[string]string)
 	for k, v := range create.Options {
 		networkOptions[k] = v
@@ -335,8 +331,28 @@ func (daemon *Daemon) createNetwork(cfg *config.Config, create types.NetworkCrea
 		nwOptions = append(nwOptions, libnetwork.NetworkOptionConfigOnly())
 	}
 
-	if err := network.ValidateIPAM(create.IPAM); err != nil {
-		return nil, errdefs.InvalidParameter(err)
+	if err := network.ValidateIPAM(create.IPAM, create.EnableIPv6); err != nil {
+		if agent {
+			// This function is called with agent=false for all networks. For swarm-scoped
+			// networks, the configuration is validated but ManagerRedirectError is returned
+			// and the network is not created. Then, each time a swarm-scoped network is
+			// needed, this function is called again with agent=true.
+			//
+			// Non-swarm networks created before ValidateIPAM was introduced continue to work
+			// as they did before-upgrade, even if they would fail the new checks on creation
+			// (for example, by having host-bits set in their subnet). Those networks are not
+			// seen again here.
+			//
+			// By dropping errors for agent networks, existing swarm-scoped networks also
+			// continue to behave as they did before upgrade - but new networks are still
+			// validated.
+			log.G(context.TODO()).WithFields(log.Fields{
+				"error":   err,
+				"network": create.Name,
+			}).Warn("Continuing with validation errors in agent IPAM")
+		} else {
+			return nil, errdefs.InvalidParameter(err)
+		}
 	}
 
 	if create.IPAM != nil {
@@ -788,7 +804,7 @@ func (daemon *Daemon) clearAttachableNetworks() {
 }
 
 // buildCreateEndpointOptions builds endpoint options from a given network.
-func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, epConfig *network.EndpointSettings, sb *libnetwork.Sandbox, daemonDNS []string) ([]libnetwork.EndpointOption, error) {
+func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, epConfig *internalnetwork.EndpointSettings, sb *libnetwork.Sandbox, daemonDNS []string) ([]libnetwork.EndpointOption, error) {
 	var createOptions []libnetwork.EndpointOption
 	var genericOptions = make(options.Generic)
 
@@ -824,8 +840,8 @@ func buildCreateEndpointOptions(c *container.Container, n *libnetwork.Network, e
 			createOptions = append(createOptions, libnetwork.EndpointOptionGeneric(options.Generic{k: v}))
 		}
 
-		if epConfig.MacAddress != "" {
-			mac, err := net.ParseMAC(epConfig.MacAddress)
+		if epConfig.DesiredMacAddress != "" {
+			mac, err := net.ParseMAC(epConfig.DesiredMacAddress)
 			if err != nil {
 				return nil, err
 			}

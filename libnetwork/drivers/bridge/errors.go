@@ -74,7 +74,7 @@ func (enip *ErrNoIPAddr) Error() string {
 // InternalError denotes the type of this error
 func (enip *ErrNoIPAddr) InternalError() {}
 
-// ErrInvalidGateway is returned when the user provided default gateway (v4/v6) is not not valid.
+// ErrInvalidGateway is returned when the user provided default gateway (v4/v6) is not valid.
 type ErrInvalidGateway struct{}
 
 func (eig *ErrInvalidGateway) Error() string {
@@ -103,17 +103,6 @@ func (uat ErrUnsupportedAddressType) Error() string {
 
 // InvalidParameter denotes the type of this error
 func (uat ErrUnsupportedAddressType) InvalidParameter() {}
-
-// ActiveEndpointsError is returned when there are
-// still active endpoints in the network being deleted.
-type ActiveEndpointsError string
-
-func (aee ActiveEndpointsError) Error() string {
-	return fmt.Sprintf("network %s has active endpoint", string(aee))
-}
-
-// Forbidden denotes the type of this error
-func (aee ActiveEndpointsError) Forbidden() {}
 
 // InvalidNetworkIDError is returned when the passed
 // network id for an existing network is not a known id.

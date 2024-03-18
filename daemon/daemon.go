@@ -180,6 +180,11 @@ func (daemon *Daemon) config() *configStore {
 	return cfg
 }
 
+// Config returns daemon's config.
+func (daemon *Daemon) Config() config.Config {
+	return daemon.config().Config
+}
+
 // HasExperimental returns whether the experimental features of the daemon are enabled or not
 func (daemon *Daemon) HasExperimental() bool {
 	return daemon.config().Experimental
@@ -442,7 +447,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 						c.Lock()
 						c.Paused = false
 						daemon.setStateCounter(c)
-						daemon.updateHealthMonitor(c)
+						daemon.initHealthMonitor(c)
 						if err := c.CheckpointTo(daemon.containersReplica); err != nil {
 							baseLogger.WithError(err).Error("failed to update paused container state")
 						}
@@ -451,7 +456,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 				case !c.IsPaused() && alive:
 					logger(c).Debug("restoring healthcheck")
 					c.Lock()
-					daemon.updateHealthMonitor(c)
+					daemon.initHealthMonitor(c)
 					c.Unlock()
 				}
 
@@ -466,7 +471,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 						ces.ExitCode = 255
 					}
 					c.SetStopped(&ces)
-					daemon.Cleanup(c)
+					daemon.Cleanup(context.TODO(), c)
 					if err := c.CheckpointTo(daemon.containersReplica); err != nil {
 						baseLogger.WithError(err).Error("failed to update stopped container state")
 					}
@@ -957,8 +962,8 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		// TODO(stevvooe): We may need to allow configuration of this on the client.
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(defaults.DefaultMaxRecvMsgSize)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(defaults.DefaultMaxSendMsgSize)),
-		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),
-		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor()),
+		grpc.WithUnaryInterceptor(otelgrpc.UnaryClientInterceptor()),   //nolint:staticcheck // TODO(thaJeztah): ignore SA1019 for deprecated options: see https://github.com/moby/moby/issues/47437
+		grpc.WithStreamInterceptor(otelgrpc.StreamClientInterceptor()), //nolint:staticcheck // TODO(thaJeztah): ignore SA1019 for deprecated options: see https://github.com/moby/moby/issues/47437
 	}
 
 	if cfgStore.ContainerdAddr != "" {
@@ -1062,7 +1067,11 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// be set through an environment variable, a daemon start parameter, or chosen through
 	// initialization of the layerstore through driver priority order for example.
 	driverName := os.Getenv("DOCKER_DRIVER")
-	if isWindows {
+	if isWindows && d.UsesSnapshotter() {
+		// Containerd WCOW snapshotter
+		driverName = "windows"
+	} else if isWindows {
+		// Docker WCOW graphdriver
 		driverName = "windowsfilter"
 	} else if driverName != "" {
 		log.G(ctx).Infof("Setting the storage driver from the $DOCKER_DRIVER environment variable (%s)", driverName)
@@ -1220,9 +1229,10 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	engineMemory.Set(float64(info.MemTotal))
 
 	log.G(ctx).WithFields(log.Fields{
-		"version":     dockerversion.Version,
-		"commit":      dockerversion.GitCommit,
-		"graphdriver": d.ImageService().StorageDriver(),
+		"version":                dockerversion.Version,
+		"commit":                 dockerversion.GitCommit,
+		"storage-driver":         d.ImageService().StorageDriver(),
+		"containerd-snapshotter": d.UsesSnapshotter(),
 	}).Info("Docker daemon")
 
 	return d, nil
@@ -1510,6 +1520,34 @@ func CreateDaemonRoot(config *config.Config) error {
 	return setupDaemonRoot(config, realRoot, idMapping.RootPair())
 }
 
+// RemapContainerdNamespaces returns the right containerd namespaces to use:
+// - if they are not already set in the config file
+// -  and the daemon is running with user namespace remapping enabled
+// Then it will return new namespace names, otherwise it will return the existing
+// namespaces
+func RemapContainerdNamespaces(config *config.Config) (ns string, pluginNs string, err error) {
+	idMapping, err := setupRemappedRoot(config)
+	if err != nil {
+		return "", "", err
+	}
+	if idMapping.Empty() {
+		return config.ContainerdNamespace, config.ContainerdPluginNamespace, nil
+	}
+	root := idMapping.RootPair()
+
+	ns = config.ContainerdNamespace
+	if _, ok := config.ValuesSet["containerd-namespace"]; !ok {
+		ns = fmt.Sprintf("%s-%d.%d", config.ContainerdNamespace, root.UID, root.GID)
+	}
+
+	pluginNs = config.ContainerdPluginNamespace
+	if _, ok := config.ValuesSet["containerd-plugin-namespace"]; !ok {
+		pluginNs = fmt.Sprintf("%s-%d.%d", config.ContainerdPluginNamespace, root.UID, root.GID)
+	}
+
+	return
+}
+
 // checkpointAndSave grabs a container lock to safely call container.CheckpointTo
 func (daemon *Daemon) checkpointAndSave(container *container.Container) error {
 	container.Lock()
@@ -1585,9 +1623,15 @@ type imageBackend struct {
 	registryService *registry.Service
 }
 
-// GetRepository returns a repository from the registry.
-func (i *imageBackend) GetRepository(ctx context.Context, ref reference.Named, authConfig *registrytypes.AuthConfig) (dist.Repository, error) {
-	return distribution.GetRepository(ctx, ref, &distribution.ImagePullConfig{
+// GetRepositories returns a list of repositories configured for the given
+// reference. Multiple repositories can be returned if the reference is for
+// the default (Docker Hub) registry and a mirror is configured, but it omits
+// registries that were not reachable (pinging the /v2/ endpoint failed).
+//
+// It returns an error if it was unable to reach any of the registries for
+// the given reference, or if the provided reference is invalid.
+func (i *imageBackend) GetRepositories(ctx context.Context, ref reference.Named, authConfig *registrytypes.AuthConfig) ([]dist.Repository, error) {
+	return distribution.GetRepositories(ctx, ref, &distribution.ImagePullConfig{
 		Config: distribution.Config{
 			AuthConfig:      authConfig,
 			RegistryService: i.registryService,

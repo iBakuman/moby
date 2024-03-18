@@ -39,13 +39,6 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 		return err
 	}
 
-	// TODO: remove pause arg, and always pause in backend
-	pause := httputils.BoolValue(r, "pause")
-	version := httputils.VersionFromContext(ctx)
-	if r.FormValue("pause") == "" && versions.GreaterThanOrEqualTo(version, "1.13") {
-		pause = true
-	}
-
 	config, _, _, err := s.decoder.DecodeConfig(r.Body)
 	if err != nil && !errors.Is(err, io.EOF) { // Do not fail if body is empty.
 		return err
@@ -57,7 +50,7 @@ func (s *containerRouter) postCommit(ctx context.Context, w http.ResponseWriter,
 	}
 
 	imgID, err := s.backend.CreateImageFromContainer(ctx, r.Form.Get("container"), &backend.CreateImageConfig{
-		Pause:   pause,
+		Pause:   httputils.BoolValueOrDefault(r, "pause", true), // TODO(dnephin): remove pause arg, and always pause in backend
 		Tag:     ref,
 		Author:  r.Form.Get("author"),
 		Comment: r.Form.Get("comment"),
@@ -118,14 +111,11 @@ func (s *containerRouter) getContainersStats(ctx context.Context, w http.Respons
 		oneShot = httputils.BoolValueOrDefault(r, "one-shot", false)
 	}
 
-	config := &backend.ContainerStatsConfig{
+	return s.backend.ContainerStats(ctx, vars["name"], &backend.ContainerStatsConfig{
 		Stream:    stream,
 		OneShot:   oneShot,
 		OutStream: w,
-		Version:   httputils.VersionFromContext(ctx),
-	}
-
-	return s.backend.ContainerStats(ctx, vars["name"], config)
+	})
 }
 
 func (s *containerRouter) getContainersLogs(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
@@ -178,14 +168,6 @@ func (s *containerRouter) getContainersExport(ctx context.Context, w http.Respon
 	return s.backend.ContainerExport(ctx, vars["name"], w)
 }
 
-type bodyOnStartError struct{}
-
-func (bodyOnStartError) Error() string {
-	return "starting container with non-empty request body was deprecated since API v1.22 and removed in v1.24"
-}
-
-func (bodyOnStartError) InvalidParameter() {}
-
 func (s *containerRouter) postContainersStart(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	// If contentLength is -1, we can assumed chunked encoding
 	// or more technically that the length is unknown
@@ -193,33 +175,17 @@ func (s *containerRouter) postContainersStart(ctx context.Context, w http.Respon
 	// net/http otherwise seems to swallow any headers related to chunked encoding
 	// including r.TransferEncoding
 	// allow a nil body for backwards compatibility
-
-	version := httputils.VersionFromContext(ctx)
-	var hostConfig *container.HostConfig
+	//
 	// A non-nil json object is at least 7 characters.
 	if r.ContentLength > 7 || r.ContentLength == -1 {
-		if versions.GreaterThanOrEqualTo(version, "1.24") {
-			return bodyOnStartError{}
-		}
-
-		if err := httputils.CheckForJSON(r); err != nil {
-			return err
-		}
-
-		c, err := s.decoder.DecodeHostConfig(r.Body)
-		if err != nil {
-			return err
-		}
-		hostConfig = c
+		return errdefs.InvalidParameter(errors.New("starting container with non-empty request body was deprecated since API v1.22 and removed in v1.24"))
 	}
 
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
-	checkpoint := r.Form.Get("checkpoint")
-	checkpointDir := r.Form.Get("checkpoint-dir")
-	if err := s.backend.ContainerStart(ctx, vars["name"], hostConfig, checkpoint, checkpointDir); err != nil {
+	if err := s.backend.ContainerStart(ctx, vars["name"], r.Form.Get("checkpoint"), r.Form.Get("checkpoint-dir")); err != nil {
 		return err
 	}
 
@@ -255,25 +221,14 @@ func (s *containerRouter) postContainersStop(ctx context.Context, w http.Respons
 	return nil
 }
 
-func (s *containerRouter) postContainersKill(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
+func (s *containerRouter) postContainersKill(_ context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
 	if err := httputils.ParseForm(r); err != nil {
 		return err
 	}
 
 	name := vars["name"]
 	if err := s.backend.ContainerKill(name, r.Form.Get("signal")); err != nil {
-		var isStopped bool
-		if errdefs.IsConflict(err) {
-			isStopped = true
-		}
-
-		// Return error that's not caused because the container is stopped.
-		// Return error if the container is not running and the api is >= 1.20
-		// to keep backwards compatibility.
-		version := httputils.VersionFromContext(ctx)
-		if versions.GreaterThanOrEqualTo(version, "1.20") || !isStopped {
-			return errors.Wrapf(err, "Cannot kill container: %s", name)
-		}
+		return errors.Wrapf(err, "cannot kill container: %s", name)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -512,7 +467,6 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 	}
 
 	version := httputils.VersionFromContext(ctx)
-	adjustCPUShares := versions.LessThan(version, "1.19")
 
 	// When using API 1.24 and under, the client is responsible for removing the container
 	if versions.LessThan(version, "1.25") {
@@ -602,17 +556,27 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 		hostConfig.Annotations = nil
 	}
 
+	defaultReadOnlyNonRecursive := false
 	if versions.LessThan(version, "1.44") {
 		if config.Healthcheck != nil {
 			// StartInterval was added in API 1.44
 			config.Healthcheck.StartInterval = 0
 		}
 
+		// Set ReadOnlyNonRecursive to true because it was added in API 1.44
+		// Before that all read-only mounts were non-recursive.
+		// Keep that behavior for clients on older APIs.
+		defaultReadOnlyNonRecursive = true
+
 		for _, m := range hostConfig.Mounts {
-			if m.BindOptions != nil {
-				// Ignore ReadOnlyNonRecursive because it was added in API 1.44.
-				m.BindOptions.ReadOnlyNonRecursive = false
-				if m.BindOptions.ReadOnlyForceRecursive {
+			if m.Type == mount.TypeBind {
+				if m.BindOptions != nil && m.BindOptions.ReadOnlyForceRecursive {
+					// NOTE: that technically this is a breaking change for older
+					// API versions, and we should ignore the new field.
+					// However, this option may be incorrectly set by a client with
+					// the expectation that the failing to apply recursive read-only
+					// is enforced, so we decided to produce an error instead,
+					// instead of silently ignoring.
 					return errdefs.InvalidParameter(errors.New("BindOptions.ReadOnlyForceRecursive needs API v1.44 or newer"))
 				}
 			}
@@ -625,6 +589,14 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 				l = append(l, k)
 			}
 			return errdefs.InvalidParameter(errors.Errorf("Container cannot be created with multiple network endpoints: %s", strings.Join(l, ", ")))
+		}
+	}
+
+	if versions.LessThan(version, "1.45") {
+		for _, m := range hostConfig.Mounts {
+			if m.VolumeOptions != nil && m.VolumeOptions.Subpath != "" {
+				return errdefs.InvalidParameter(errors.New("VolumeOptions.Subpath needs API v1.45 or newer"))
+			}
 		}
 	}
 
@@ -644,12 +616,12 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 	}
 
 	ccr, err := s.backend.ContainerCreate(ctx, backend.ContainerCreateConfig{
-		Name:             name,
-		Config:           config,
-		HostConfig:       hostConfig,
-		NetworkingConfig: networkingConfig,
-		AdjustCPUShares:  adjustCPUShares,
-		Platform:         platform,
+		Name:                        name,
+		Config:                      config,
+		HostConfig:                  hostConfig,
+		NetworkingConfig:            networkingConfig,
+		Platform:                    platform,
+		DefaultReadOnlyNonRecursive: defaultReadOnlyNonRecursive,
 	})
 	if err != nil {
 		return err
@@ -662,42 +634,73 @@ func (s *containerRouter) postContainersCreate(ctx context.Context, w http.Respo
 // networkingConfig to set the endpoint-specific MACAddress field introduced in API v1.44. It returns a warning message
 // or an error if the container-wide field was specified for API >= v1.44.
 func handleMACAddressBC(config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, version string) (string, error) {
-	if config.MacAddress == "" { //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
-		return "", nil
-	}
-
 	deprecatedMacAddress := config.MacAddress //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
 
+	// For older versions of the API, migrate the container-wide MAC address to EndpointsConfig.
 	if versions.LessThan(version, "1.44") {
-		// The container-wide MacAddress parameter is deprecated and should now be specified in EndpointsConfig.
-		if hostConfig.NetworkMode.IsDefault() || hostConfig.NetworkMode.IsBridge() || hostConfig.NetworkMode.IsUserDefined() {
-			nwName := hostConfig.NetworkMode.NetworkName()
-			if _, ok := networkingConfig.EndpointsConfig[nwName]; !ok {
-				networkingConfig.EndpointsConfig[nwName] = &network.EndpointSettings{}
+		if deprecatedMacAddress == "" {
+			// If a MAC address is supplied in EndpointsConfig, discard it because the old API
+			// would have ignored it.
+			for _, ep := range networkingConfig.EndpointsConfig {
+				ep.MacAddress = ""
 			}
-			// Overwrite the config: either the endpoint's MacAddress was set by the user on API < v1.44, which
-			// must be ignored, or migrate the top-level MacAddress to the endpoint's config.
-			networkingConfig.EndpointsConfig[nwName].MacAddress = deprecatedMacAddress
+			return "", nil
 		}
 		if !hostConfig.NetworkMode.IsDefault() && !hostConfig.NetworkMode.IsBridge() && !hostConfig.NetworkMode.IsUserDefined() {
 			return "", runconfig.ErrConflictContainerNetworkAndMac
 		}
 
+		// There cannot be more than one entry in EndpointsConfig with API < 1.44.
+
+		// If there's no EndpointsConfig, create a place to store the configured address. It is
+		// safe to use NetworkMode as the network name, whether it's a name or id/short-id, as
+		// it will be normalised later and there is no other EndpointSettings object that might
+		// refer to this network/endpoint.
+		if len(networkingConfig.EndpointsConfig) == 0 {
+			nwName := hostConfig.NetworkMode.NetworkName()
+			networkingConfig.EndpointsConfig[nwName] = &network.EndpointSettings{}
+		}
+		// There's exactly one network in EndpointsConfig, either from the API or just-created.
+		// Migrate the container-wide setting to it.
+		// No need to check for a match between NetworkMode and the names/ids in EndpointsConfig,
+		// the old version of the API would have applied the address to this network anyway.
+		for _, ep := range networkingConfig.EndpointsConfig {
+			ep.MacAddress = deprecatedMacAddress
+		}
 		return "", nil
 	}
 
+	// The container-wide MacAddress parameter is deprecated and should now be specified in EndpointsConfig.
+	if deprecatedMacAddress == "" {
+		return "", nil
+	}
 	var warning string
 	if hostConfig.NetworkMode.IsDefault() || hostConfig.NetworkMode.IsBridge() || hostConfig.NetworkMode.IsUserDefined() {
 		nwName := hostConfig.NetworkMode.NetworkName()
-		if _, ok := networkingConfig.EndpointsConfig[nwName]; !ok {
-			networkingConfig.EndpointsConfig[nwName] = &network.EndpointSettings{}
-		}
-
-		ep := networkingConfig.EndpointsConfig[nwName]
-		if ep.MacAddress == "" {
-			ep.MacAddress = deprecatedMacAddress
-		} else if ep.MacAddress != deprecatedMacAddress {
-			return "", errdefs.InvalidParameter(errors.New("the container-wide MAC address should match the endpoint-specific MAC address for the main network or should be left empty"))
+		// If there's no endpoint config, create a place to store the configured address.
+		if len(networkingConfig.EndpointsConfig) == 0 {
+			networkingConfig.EndpointsConfig[nwName] = &network.EndpointSettings{
+				MacAddress: deprecatedMacAddress,
+			}
+		} else {
+			// There is existing endpoint config - if it's not indexed by NetworkMode.Name(), we
+			// can't tell which network the container-wide settings was intended for. NetworkMode,
+			// the keys in EndpointsConfig and the NetworkID in EndpointsConfig may mix network
+			// name/id/short-id. It's not safe to create EndpointsConfig under the NetworkMode
+			// name to store the container-wide MAC address, because that may result in two sets
+			// of EndpointsConfig for the same network and one set will be discarded later. So,
+			// reject the request ...
+			ep, ok := networkingConfig.EndpointsConfig[nwName]
+			if !ok {
+				return "", errdefs.InvalidParameter(errors.New("if a container-wide MAC address is supplied, HostConfig.NetworkMode must match the identity of a network in NetworkSettings.Networks"))
+			}
+			// ep is the endpoint that needs the container-wide MAC address; migrate the address
+			// to it, or bail out if there's a mismatch.
+			if ep.MacAddress == "" {
+				ep.MacAddress = deprecatedMacAddress
+			} else if ep.MacAddress != deprecatedMacAddress {
+				return "", errdefs.InvalidParameter(errors.New("the container-wide MAC address must match the endpoint-specific MAC address for the main network, or be left empty"))
+			}
 		}
 	}
 	warning = "The container-wide MacAddress field is now deprecated. It should be specified in EndpointsConfig instead."

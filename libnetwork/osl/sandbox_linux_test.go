@@ -44,9 +44,11 @@ func newKey(t *testing.T) (string, error) {
 	}
 
 	name = filepath.Join("/tmp", name)
-	if _, err := os.Create(name); err != nil {
+	f, err := os.Create(name)
+	if err != nil {
 		return "", err
 	}
+	_ = f.Close()
 
 	// Set the rpmCleanupPeriod to be low to make the test run quicker
 	gpmLock.Lock()
@@ -72,7 +74,7 @@ func newInfo(t *testing.T, hnd *netlink.Handle) (*Namespace, error) {
 	}
 	addr.IP = ip4
 
-	ip6, addrv6, err := net.ParseCIDR("fe80::2/64")
+	ip6, addrv6, err := net.ParseCIDR("fdac:97b4:dbcc::2/64")
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +118,7 @@ func newInfo(t *testing.T, hnd *netlink.Handle) (*Namespace, error) {
 	return &Namespace{
 		iFaces: []*Interface{intf1, intf2, intf3},
 		gw:     net.ParseIP("192.168.1.1"),
-		gwv6:   net.ParseIP("fe80::1"),
+		gwv6:   net.ParseIP("fdac:97b4:dbcc::1/64"),
 	}, nil
 }
 

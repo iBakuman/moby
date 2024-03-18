@@ -12,9 +12,9 @@ on:
         default: "graphdriver"
 
 env:
-  GO_VERSION: "1.21.5"
+  GO_VERSION: "1.21.8"
   GOTESTLIST_VERSION: v0.3.1
-  TESTSTAT_VERSION: v0.1.3
+  TESTSTAT_VERSION: v0.1.25
   ITG_CLI_MATRIX_SIZE: 6
   DOCKER_EXPERIMENTAL: 1
   DOCKER_GRAPHDRIVER: ${{ inputs.storage == 'snapshotter' && 'overlayfs' || 'overlay2' }}
@@ -23,21 +23,21 @@ env:
 jobs:
   unit:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 120
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up runner
         uses: ./.github/actions/setup-runner
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v4
         with:
           targets: dev
           set: |
@@ -57,22 +57,23 @@ jobs:
           tree -nh /tmp/reports
       -
         name: Send to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           directory: ./bundles
           env_vars: RUNNER_OS
           flags: unit
+          token: ${{ secrets.CODECOV_TOKEN }}  # used to upload coverage reports: https://github.com/moby/buildkit/pull/4660#issue-2142122533
       -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.storage }}-unit-reports
+          name: test-reports-unit-${{ inputs.storage }}
           path: /tmp/reports/*
 
   unit-report:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 10
     if: always()
     needs:
@@ -80,14 +81,14 @@ jobs:
     steps:
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
       -
         name: Download reports
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.storage }}-unit-reports
+          name: test-reports-unit-${{ inputs.storage }}
           path: /tmp/reports
       -
         name: Install teststat
@@ -96,16 +97,16 @@ jobs:
       -
         name: Create summary
         run: |
-          teststat -markdown $(find /tmp/reports -type f -name '*.json' -print0 | xargs -0) >> $GITHUB_STEP_SUMMARY
+          find /tmp/reports -type f -name '*-go-test-report.json' -exec teststat -markdown {} \+ >> $GITHUB_STEP_SUMMARY
 
   docker-py:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 120
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up runner
         uses: ./.github/actions/setup-runner
@@ -114,10 +115,10 @@ jobs:
         uses: ./.github/actions/setup-tracing
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v4
         with:
           targets: dev
           set: |
@@ -145,28 +146,28 @@ jobs:
       -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.storage }}-docker-py-reports
+          name: test-reports-docker-py-${{ inputs.storage }}
           path: /tmp/reports/*
 
   integration-flaky:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 120
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up runner
         uses: ./.github/actions/setup-runner
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v4
         with:
           targets: dev
           set: |
@@ -180,7 +181,7 @@ jobs:
 
   integration:
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -196,7 +197,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up runner
         uses: ./.github/actions/setup-runner
@@ -217,10 +218,10 @@ jobs:
           echo "CACHE_DEV_SCOPE=${CACHE_DEV_SCOPE}" >> $GITHUB_ENV
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v4
         with:
           targets: dev
           set: |
@@ -236,10 +237,13 @@ jobs:
         name: Prepare reports
         if: always()
         run: |
-          reportsPath="/tmp/reports/${{ matrix.os }}"
+          reportsName=${{ matrix.os }}
           if [ -n "${{ matrix.mode }}" ]; then
-            reportsPath="$reportsPath-${{ matrix.mode }}"
+            reportsName="$reportsName-${{ matrix.mode }}"
           fi
+          reportsPath="/tmp/reports/$reportsName"
+          echo "TESTREPORTS_NAME=$reportsName" >> $GITHUB_ENV
+          
           mkdir -p bundles $reportsPath
           find bundles -path '*/root/*overlay2' -prune -o -type f \( -name '*-report.json' -o -name '*.log' -o -name '*.out' -o -name '*.prof' -o -name '*-report.xml' \) -print | xargs sudo tar -czf /tmp/reports.tar.gz
           tar -xzf /tmp/reports.tar.gz -C $reportsPath
@@ -249,11 +253,12 @@ jobs:
           curl -sSLf localhost:16686/api/traces?service=integration-test-client > $reportsPath/jaeger-trace.json
       -
         name: Send to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           directory: ./bundles/test-integration
           env_vars: RUNNER_OS
           flags: integration,${{ matrix.mode }}
+          token: ${{ secrets.CODECOV_TOKEN }}  # used to upload coverage reports: https://github.com/moby/buildkit/pull/4660#issue-2142122533
       -
         name: Test daemon logs
         if: always()
@@ -262,14 +267,14 @@ jobs:
       -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.storage }}-integration-reports
+          name: test-reports-integration-${{ inputs.storage }}-${{ env.TESTREPORTS_NAME }}
           path: /tmp/reports/*
 
   integration-report:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 10
     if: always()
     needs:
@@ -277,15 +282,16 @@ jobs:
     steps:
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
       -
         name: Download reports
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.storage }}-integration-reports
           path: /tmp/reports
+          pattern: test-reports-integration-${{ inputs.storage }}-*
+          merge-multiple: true
       -
         name: Install teststat
         run: |
@@ -293,20 +299,20 @@ jobs:
       -
         name: Create summary
         run: |
-          teststat -markdown $(find /tmp/reports -type f -name '*.json' -print0 | xargs -0) >> $GITHUB_STEP_SUMMARY
+          find /tmp/reports -type f -name '*-go-test-report.json' -exec teststat -markdown {} \+ >> $GITHUB_STEP_SUMMARY
 
   integration-cli-prepare:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     outputs:
       matrix: ${{ steps.tests.outputs.matrix }}
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
       -
@@ -332,7 +338,7 @@ jobs:
 
   integration-cli:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 120
     needs:
       - integration-cli-prepare
@@ -343,7 +349,7 @@ jobs:
     steps:
       -
         name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
       -
         name: Set up runner
         uses: ./.github/actions/setup-runner
@@ -352,10 +358,10 @@ jobs:
         uses: ./.github/actions/setup-tracing
       -
         name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
       -
         name: Build dev image
-        uses: docker/bake-action@v2
+        uses: docker/bake-action@v4
         with:
           targets: dev
           set: |
@@ -372,7 +378,10 @@ jobs:
         name: Prepare reports
         if: always()
         run: |
-          reportsPath=/tmp/reports/$(echo -n "${{ matrix.test }}" | sha256sum | cut -d " " -f 1)
+          reportsName=$(echo -n "${{ matrix.test }}" | sha256sum | cut -d " " -f 1)
+          reportsPath=/tmp/reports/$reportsName
+          echo "TESTREPORTS_NAME=$reportsName" >> $GITHUB_ENV
+          
           mkdir -p bundles $reportsPath
           echo "${{ matrix.test }}" | tr -s '|' '\n' | tee -a "$reportsPath/tests.txt"
           find bundles -path '*/root/*overlay2' -prune -o -type f \( -name '*-report.json' -o -name '*.log' -o -name '*.out' -o -name '*.prof' -o -name '*-report.xml' \) -print | xargs sudo tar -czf /tmp/reports.tar.gz
@@ -383,11 +392,12 @@ jobs:
           curl -sSLf localhost:16686/api/traces?service=integration-test-client > $reportsPath/jaeger-trace.json
       -
         name: Send to Codecov
-        uses: codecov/codecov-action@v3
+        uses: codecov/codecov-action@v4
         with:
           directory: ./bundles/test-integration
           env_vars: RUNNER_OS
           flags: integration-cli
+          token: ${{ secrets.CODECOV_TOKEN }}  # used to upload coverage reports: https://github.com/moby/buildkit/pull/4660#issue-2142122533
       -
         name: Test daemon logs
         if: always()
@@ -396,14 +406,14 @@ jobs:
       -
         name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
-          name: ${{ inputs.storage }}-integration-cli-reports
+          name: test-reports-integration-cli-${{ inputs.storage }}-${{ env.TESTREPORTS_NAME }}
           path: /tmp/reports/*
 
   integration-cli-report:
     runs-on: ubuntu-20.04
-    continue-on-error: ${{ inputs.storage == 'snapshotter' && github.event_name != 'pull_request' }}
+    continue-on-error: ${{ github.event_name != 'pull_request' }}
     timeout-minutes: 10
     if: always()
     needs:
@@ -411,15 +421,16 @@ jobs:
     steps:
       -
         name: Set up Go
-        uses: actions/setup-go@v3
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
       -
         name: Download reports
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
-          name: ${{ inputs.storage }}-integration-cli-reports
           path: /tmp/reports
+          pattern: test-reports-integration-cli-${{ inputs.storage }}-*
+          merge-multiple: true
       -
         name: Install teststat
         run: |
@@ -427,4 +438,4 @@ jobs:
       -
         name: Create summary
         run: |
-          teststat -markdown $(find /tmp/reports -type f -name '*.json' -print0 | xargs -0) >> $GITHUB_STEP_SUMMARY
+          find /tmp/reports -type f -name '*-go-test-report.json' -exec teststat -markdown {} \+ >> $GITHUB_STEP_SUMMARY

@@ -16,6 +16,7 @@ import (
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/executor/oci"
 	"github.com/moby/buildkit/executor/resources"
+	resourcestypes "github.com/moby/buildkit/executor/resources/types"
 	"github.com/moby/buildkit/executor/runcexecutor"
 	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/solver/pb"
@@ -56,9 +57,16 @@ func newExecutor(root, cgroupParent string, net *libnetwork.Controller, dnsConfi
 		return nil, err
 	}
 
+	runcCmds := []string{"runc"}
+
+	// TODO: FIXME: testing env var, replace with something better or remove in a major version or two
+	if runcOverride := os.Getenv("DOCKER_BUILDKIT_RUNC_COMMAND"); runcOverride != "" {
+		runcCmds = []string{runcOverride}
+	}
+
 	return runcexecutor.New(runcexecutor.Opt{
 		Root:                filepath.Join(root, "executor"),
-		CommandCandidates:   []string{"runc"},
+		CommandCandidates:   runcCmds,
 		DefaultCgroupParent: cgroupParent,
 		Rootless:            rootless,
 		NoPivot:             os.Getenv("DOCKER_RAMDISK") != "",
@@ -128,8 +136,8 @@ func (iface *lnInterface) init(c *libnetwork.Controller, n *libnetwork.Network) 
 }
 
 // TODO(neersighted): Unstub Sample(), and collect data from the libnetwork Endpoint.
-func (iface *lnInterface) Sample() (*network.Sample, error) {
-	return &network.Sample{}, nil
+func (iface *lnInterface) Sample() (*resourcestypes.NetworkSample, error) {
+	return &resourcestypes.NetworkSample{}, nil
 }
 
 func (iface *lnInterface) Set(s *specs.Spec) error {

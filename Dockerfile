@@ -1,19 +1,19 @@
 # syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.21.5
+ARG GO_VERSION=1.21.8
 ARG BASE_DEBIAN_DISTRO="bookworm"
 ARG GOLANG_IMAGE="golang:${GO_VERSION}-${BASE_DEBIAN_DISTRO}"
-ARG XX_VERSION=1.2.1
+ARG XX_VERSION=1.4.0
 
 ARG VPNKIT_VERSION=0.5.0
 
 ARG DOCKERCLI_REPOSITORY="https://github.com/docker/cli.git"
-ARG DOCKERCLI_VERSION=v24.0.2
+ARG DOCKERCLI_VERSION=v26.0.0-rc1
 # cli version used for integration-cli tests
 ARG DOCKERCLI_INTEGRATION_REPOSITORY="https://github.com/docker/cli.git"
 ARG DOCKERCLI_INTEGRATION_VERSION=v17.06.2-ce
-ARG BUILDX_VERSION=0.12.0
-ARG COMPOSE_VERSION=v2.20.1
+ARG BUILDX_VERSION=0.13.1
+ARG COMPOSE_VERSION=v2.24.7
 
 ARG SYSTEMD="false"
 ARG DOCKER_STATIC=1
@@ -198,7 +198,7 @@ RUN git init . && git remote add origin "https://github.com/containerd/container
 # When updating the binary version you may also need to update the vendor
 # version to pick up bug fixes or new APIs, however, usually the Go packages
 # are built from a commit from the master branch.
-ARG CONTAINERD_VERSION=v1.7.11
+ARG CONTAINERD_VERSION=v1.7.13
 RUN git fetch -q --depth 1 origin "${CONTAINERD_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS containerd-build
@@ -231,7 +231,7 @@ FROM binary-dummy AS containerd-windows
 FROM containerd-${TARGETOS} AS containerd
 
 FROM base AS golangci_lint
-ARG GOLANGCI_LINT_VERSION=v1.54.2
+ARG GOLANGCI_LINT_VERSION=v1.55.2
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "github.com/golangci/golangci-lint/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
@@ -245,11 +245,17 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
      && /build/gotestsum --version
 
 FROM base AS shfmt
-ARG SHFMT_VERSION=v3.6.0
+ARG SHFMT_VERSION=v3.8.0
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
         GOBIN=/build/ GO111MODULE=on go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}" \
      && /build/shfmt --version
+
+FROM base AS gopls
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+        GOBIN=/build/ GO111MODULE=on go install "golang.org/x/tools/gopls@latest" \
+     && /build/gopls version
 
 FROM base AS dockercli
 WORKDIR /go/src/github.com/docker/cli
@@ -283,7 +289,7 @@ RUN git init . && git remote add origin "https://github.com/opencontainers/runc.
 # that is used. If you need to update runc, open a pull request in the containerd
 # project first, and update both after that is merged. When updating RUNC_VERSION,
 # consider updating runc in vendor.mod accordingly.
-ARG RUNC_VERSION=v1.1.11
+ARG RUNC_VERSION=v1.1.12
 RUN git fetch -q --depth 1 origin "${RUNC_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS runc-build
@@ -351,8 +357,8 @@ FROM tini-${TARGETOS} AS tini
 FROM base AS rootlesskit-src
 WORKDIR /usr/src/rootlesskit
 RUN git init . && git remote add origin "https://github.com/rootless-containers/rootlesskit.git"
-# When updating, also update rootlesskit commit in vendor.mod accordingly.
-ARG ROOTLESSKIT_VERSION=v1.1.0
+# When updating, also update vendor.mod and hack/dockerfile/install/rootlesskit.installer accordingly.
+ARG ROOTLESSKIT_VERSION=v2.0.2
 RUN git fetch -q --depth 1 origin "${ROOTLESSKIT_VERSION}" +refs/tags/*:refs/tags/* && git checkout -q FETCH_HEAD
 
 FROM base AS rootlesskit-build
@@ -654,6 +660,11 @@ RUN <<EOT
   file docker-proxy
   docker-proxy --version
 EOT
+
+# devcontainer is a stage used by .devcontainer/devcontainer.json
+FROM dev-base AS devcontainer
+COPY --link . .
+COPY --link --from=gopls         /build/ /usr/local/bin/
 
 # usage:
 # > make shell

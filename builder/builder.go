@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
@@ -62,10 +63,8 @@ type ExecBackend interface {
 	ContainerCreateIgnoreImagesArgsEscaped(ctx context.Context, config backend.ContainerCreateConfig) (container.CreateResponse, error)
 	// ContainerRm removes a container specified by `id`.
 	ContainerRm(name string, config *backend.ContainerRmConfig) error
-	// ContainerKill stops the container execution abruptly.
-	ContainerKill(containerID string, sig string) error
 	// ContainerStart starts a new container
-	ContainerStart(ctx context.Context, containerID string, hostConfig *container.HostConfig, checkpoint string, checkpointDir string) error
+	ContainerStart(ctx context.Context, containerID string, checkpoint string, checkpointDir string) error
 	// ContainerWait stops processing until the given container is stopped.
 	ContainerWait(ctx context.Context, name string, condition containerpkg.WaitCondition) (<-chan containerpkg.StateStatus, error)
 }
@@ -87,7 +86,7 @@ type ImageCacheBuilder interface {
 type ImageCache interface {
 	// GetCache returns a reference to a cached image whose parent equals `parent`
 	// and runconfig equals `cfg`. A cache miss is expected to return an empty ID and a nil error.
-	GetCache(parentID string, cfg *container.Config) (imageID string, err error)
+	GetCache(parentID string, cfg *container.Config, platform ocispec.Platform) (imageID string, err error)
 }
 
 // Image represents a Docker image used by the builder.

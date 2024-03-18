@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/versions/v1p20"
 	"github.com/docker/docker/integration-cli/cli"
 	"github.com/docker/docker/integration-cli/daemon"
 	"github.com/docker/docker/libnetwork/driverapi"
@@ -1015,22 +1014,15 @@ func (s *DockerCLINetworkSuite) TestInspectAPIMultipleNetworks(c *testing.T) {
 	cli.DockerCmd(c, "network", "connect", "mybridge1", id)
 	cli.DockerCmd(c, "network", "connect", "mybridge2", id)
 
-	body := getInspectBody(c, "v1.20", id)
-	var inspect120 v1p20.ContainerJSON
-	err := json.Unmarshal(body, &inspect120)
+	// Current API version (API v1.21 and up)
+	body := getInspectBody(c, "", id)
+	var inspectCurrent types.ContainerJSON
+	err := json.Unmarshal(body, &inspectCurrent)
 	assert.NilError(c, err)
+	assert.Equal(c, len(inspectCurrent.NetworkSettings.Networks), 3)
 
-	versionedIP := inspect120.NetworkSettings.IPAddress
-
-	body = getInspectBody(c, "v1.21", id)
-	var inspect121 types.ContainerJSON
-	err = json.Unmarshal(body, &inspect121)
-	assert.NilError(c, err)
-	assert.Equal(c, len(inspect121.NetworkSettings.Networks), 3)
-
-	bridge := inspect121.NetworkSettings.Networks["bridge"]
-	assert.Equal(c, bridge.IPAddress, versionedIP)
-	assert.Equal(c, bridge.IPAddress, inspect121.NetworkSettings.IPAddress)
+	bridge := inspectCurrent.NetworkSettings.Networks["bridge"]
+	assert.Equal(c, bridge.IPAddress, inspectCurrent.NetworkSettings.IPAddress)
 }
 
 func connectContainerToNetworks(c *testing.T, d *daemon.Daemon, cName string, nws []string) {

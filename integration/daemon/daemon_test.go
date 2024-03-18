@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/daemon/config"
@@ -208,6 +208,7 @@ func TestDaemonProxy(t *testing.T) {
 			"HTTP_PROXY="+proxyServer.URL,
 			"HTTPS_PROXY="+proxyServer.URL,
 			"NO_PROXY=example.com",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
 		c := d.NewClientT(t)
 
@@ -219,12 +220,12 @@ func TestDaemonProxy(t *testing.T) {
 		assert.Check(t, is.Equal(info.HTTPSProxy, proxyServer.URL))
 		assert.Check(t, is.Equal(info.NoProxy, "example.com"))
 
-		_, err := c.ImagePull(ctx, "example.org:5000/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5000/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5000")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5000", "should not have used proxy")
 	})
@@ -245,6 +246,7 @@ func TestDaemonProxy(t *testing.T) {
 			"https_proxy="+"https://"+userPass+"myuser:mypassword@from-env-https-invalid",
 			"NO_PROXY=ignore.invalid",
 			"no_proxy=ignore.invalid",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
 		d.Start(t, "--iptables=false", "--http-proxy", proxyServer.URL, "--https-proxy", proxyServer.URL, "--no-proxy", "example.com")
 		defer d.Stop(t)
@@ -270,12 +272,12 @@ func TestDaemonProxy(t *testing.T) {
 		ok, logs := d.ScanLogsT(ctx, t, daemon.ScanLogsMatchString(userPass))
 		assert.Assert(t, !ok, "logs should not contain the non-sanitized proxy URL: %s", logs)
 
-		_, err := c.ImagePull(ctx, "example.org:5001/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5001/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5001")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5001", "should not have used proxy")
 	})
@@ -295,6 +297,7 @@ func TestDaemonProxy(t *testing.T) {
 			"https_proxy="+"https://"+userPass+"myuser:mypassword@from-env-https-invalid",
 			"NO_PROXY=ignore.invalid",
 			"no_proxy=ignore.invalid",
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
 		))
 		c := d.NewClientT(t)
 
@@ -320,12 +323,12 @@ func TestDaemonProxy(t *testing.T) {
 			"NO_PROXY",
 		))
 
-		_, err := c.ImagePull(ctx, "example.org:5002/some/image:latest", types.ImagePullOptions{})
+		_, err := c.ImagePull(ctx, "example.org:5002/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5002")
 
 		// Test NoProxy: example.com should not hit the proxy, and "received" variable should not be changed.
-		_, err = c.ImagePull(ctx, "example.com/some/image:latest", types.ImagePullOptions{})
+		_, err = c.ImagePull(ctx, "example.com/some/image:latest", image.PullOptions{})
 		assert.ErrorContains(t, err, "", "pulling should have failed")
 		assert.Equal(t, received, "example.org:5002", "should not have used proxy")
 	})
@@ -364,7 +367,9 @@ func TestDaemonProxy(t *testing.T) {
 			proxyURL    = "https://xxxxx:xxxxx@example.org"
 		)
 
-		d := daemon.New(t)
+		d := daemon.New(t, daemon.WithEnvVars(
+			"OTEL_EXPORTER_OTLP_ENDPOINT=", // To avoid OTEL hitting the proxy.
+		))
 		d.Start(t, "--iptables=false", "--http-proxy", proxyRawURL, "--https-proxy", proxyRawURL, "--no-proxy", "example.com")
 		defer d.Stop(t)
 		err := d.Signal(syscall.SIGHUP)

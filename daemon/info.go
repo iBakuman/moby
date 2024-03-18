@@ -241,12 +241,13 @@ func (daemon *Daemon) fillAPIInfo(v *system.Info, cfg *config.Config) {
 		if proto != "tcp" {
 			continue
 		}
+		const removal = "In future versions this will be a hard failure preventing the daemon from starting! Learn more at: https://docs.docker.com/go/api-security/"
 		if cfg.TLS == nil || !*cfg.TLS {
-			v.Warnings = append(v.Warnings, fmt.Sprintf("WARNING: API is accessible on http://%s without encryption.%s", addr, warn))
+			v.Warnings = append(v.Warnings, fmt.Sprintf("[DEPRECATION NOTICE]: API is accessible on http://%s without encryption.%s\n%s", addr, warn, removal))
 			continue
 		}
 		if cfg.TLSVerify == nil || !*cfg.TLSVerify {
-			v.Warnings = append(v.Warnings, fmt.Sprintf("WARNING: API is accessible on https://%s without TLS client verification.%s", addr, warn))
+			v.Warnings = append(v.Warnings, fmt.Sprintf("[DEPRECATION NOTICE]: API is accessible on https://%s without TLS client verification.%s\n%s", addr, warn, removal))
 			continue
 		}
 	}
@@ -351,11 +352,14 @@ func getConfigOrEnv(config string, env ...string) string {
 	return getEnvAny(env...)
 }
 
-// promoteNil converts a nil slice to an empty slice of that type.
+// promoteNil converts a nil slice to an empty slice.
 // A non-nil slice is returned as is.
-func promoteNil[S ~[]E, E any](s S) S {
+//
+// TODO: make generic again once we are a go module,
+// go.dev/issue/64759 is fixed, or we drop support for Go 1.21.
+func promoteNil(s []string) []string {
 	if s == nil {
-		return S{}
+		return []string{}
 	}
 	return s
 }

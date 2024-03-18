@@ -12,7 +12,6 @@ import (
 	"github.com/docker/docker/api/types/backend"
 	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
-	imagetypes "github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
@@ -83,7 +82,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	}
 
 	if opts.params.Platform == nil && opts.params.Config.Image != "" {
-		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+		img, err := daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
 		if err != nil {
 			return containertypes.CreateResponse{}, err
 		}
@@ -109,7 +108,7 @@ func (daemon *Daemon) containerCreate(ctx context.Context, daemonCfg *configStor
 	if opts.params.HostConfig == nil {
 		opts.params.HostConfig = &containertypes.HostConfig{}
 	}
-	err = daemon.adaptContainerSettings(&daemonCfg.Config, opts.params.HostConfig, opts.params.AdjustCPUShares)
+	err = daemon.adaptContainerSettings(&daemonCfg.Config, opts.params.HostConfig)
 	if err != nil {
 		return containertypes.CreateResponse{Warnings: warnings}, errdefs.InvalidParameter(err)
 	}
@@ -139,7 +138,7 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 	)
 
 	if opts.params.Config.Image != "" {
-		img, err = daemon.imageService.GetImage(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+		img, err = daemon.imageService.GetImage(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +146,7 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 		// image manifest so we can store it and later deterministically
 		// resolve the specific image the container is running
 		if daemon.UsesSnapshotter() {
-			imgManifest, err = daemon.imageService.GetImageManifest(ctx, opts.params.Config.Image, imagetypes.GetImageOpts{Platform: opts.params.Platform})
+			imgManifest, err = daemon.imageService.GetImageManifest(ctx, opts.params.Config.Image, backend.GetImageOpts{Platform: opts.params.Platform})
 			if err != nil {
 				log.G(ctx).WithError(err).Error("failed to find image manifest")
 				return nil, err
@@ -218,11 +217,11 @@ func (daemon *Daemon) create(ctx context.Context, daemonCfg *config.Config, opts
 		return nil, err
 	}
 
-	if err := daemon.setHostConfig(ctr, opts.params.HostConfig); err != nil {
+	if err := daemon.setHostConfig(ctr, opts.params.HostConfig, opts.params.DefaultReadOnlyNonRecursive); err != nil {
 		return nil, err
 	}
 
-	if err := daemon.createContainerOSSpecificSettings(ctr, opts.params.Config, opts.params.HostConfig); err != nil {
+	if err := daemon.createContainerOSSpecificSettings(ctx, ctr, opts.params.Config, opts.params.HostConfig); err != nil {
 		return nil, err
 	}
 

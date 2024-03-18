@@ -242,7 +242,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 
 	// Override BuildKit's default Resource so that it matches the semconv
 	// version that is used in our code.
-	detect.Resource = resource.Default()
+	detect.OverrideResource(resource.Default())
 	detect.Recorder = detect.NewTraceRecorder()
 
 	tp, err := detect.TracerProvider()
@@ -256,7 +256,10 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	pluginStore := plugin.NewStore()
 
 	var apiServer apiserver.Server
-	cli.authzMiddleware = initMiddlewares(&apiServer, cli.Config, pluginStore)
+	cli.authzMiddleware, err = initMiddlewares(&apiServer, cli.Config, pluginStore)
+	if err != nil {
+		return errors.Wrap(err, "failed to start API server")
+	}
 
 	d, err := daemon.NewDaemon(ctx, cli.Config, pluginStore, cli.authzMiddleware)
 	if err != nil {
@@ -270,13 +273,13 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 		return errors.Wrap(err, "failed to validate authorization plugin")
 	}
 
-	// Note that CDI is not inherrently linux-specific, there are some linux-specific assumptions / implementations in the code that
+	// Note that CDI is not inherently linux-specific, there are some linux-specific assumptions / implementations in the code that
 	// queries the properties of device on the host as wel as performs the injection of device nodes and their access permissions into the OCI spec.
 	//
 	// In order to lift this restriction the following would have to be addressed:
 	// - Support needs to be added to the cdi package for injecting Windows devices: https://tags.cncf.io/container-device-interface/issues/28
 	// - The DeviceRequests API must be extended to non-linux platforms.
-	if runtime.GOOS == "linux" && cli.Config.Experimental {
+	if runtime.GOOS == "linux" && cli.Config.Features["cdi"] {
 		daemon.RegisterCDIDriver(cli.Config.CDISpecDirs...)
 	}
 
@@ -301,14 +304,18 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	routerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	routerOptions, err := newRouterOptions(routerCtx, cli.Config, d)
+	// Get a the current daemon config, because the daemon sets up config
+	// during initialization. We cannot user the cli.Config for that reason,
+	// as that only holds the config that was set by the user.
+	//
+	// FIXME(thaJeztah): better separate runtime and config data?
+	daemonCfg := d.Config()
+	routerOpts, err := newRouterOptions(routerCtx, &daemonCfg, d, c)
 	if err != nil {
 		return err
 	}
 
-	routerOptions.cluster = c
-
-	httpServer.Handler = apiServer.CreateMux(routerOptions.Build()...)
+	httpServer.Handler = apiServer.CreateMux(routerOpts.Build()...)
 
 	go d.ProcessClusterNotifications(ctx, c.GetWatchStream())
 
@@ -350,7 +357,7 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 	notifyStopping()
 	shutdownDaemon(ctx, d)
 
-	if err := routerOptions.buildkit.Close(); err != nil {
+	if err := routerOpts.buildkit.Close(); err != nil {
 		log.G(ctx).WithError(err).Error("Failed to close buildkit")
 	}
 
@@ -373,12 +380,20 @@ func (cli *DaemonCli) start(opts *daemonOptions) (err error) {
 // TODO: This can be removed after buildkit is updated to use http/protobuf as the default.
 func setOTLPProtoDefault() {
 	const (
-		tracesEnv = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
-		protoEnv  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+		tracesEnv  = "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"
+		metricsEnv = "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL"
+		protoEnv   = "OTEL_EXPORTER_OTLP_PROTOCOL"
+
+		defaultProto = "http/protobuf"
 	)
 
-	if os.Getenv(tracesEnv) == "" && os.Getenv(protoEnv) == "" {
-		os.Setenv(tracesEnv, "http/protobuf")
+	if os.Getenv(protoEnv) == "" {
+		if os.Getenv(tracesEnv) == "" {
+			os.Setenv(tracesEnv, defaultProto)
+		}
+		if os.Getenv(metricsEnv) == "" {
+			os.Setenv(metricsEnv, defaultProto)
+		}
 	}
 }
 
@@ -391,23 +406,17 @@ type routerOptions struct {
 	cluster        *cluster.Cluster
 }
 
-func newRouterOptions(ctx context.Context, config *config.Config, d *daemon.Daemon) (routerOptions, error) {
-	opts := routerOptions{}
+func newRouterOptions(ctx context.Context, config *config.Config, d *daemon.Daemon, c *cluster.Cluster) (routerOptions, error) {
 	sm, err := session.NewManager()
 	if err != nil {
-		return opts, errors.Wrap(err, "failed to create sessionmanager")
+		return routerOptions{}, errors.Wrap(err, "failed to create sessionmanager")
 	}
 
 	manager, err := dockerfile.NewBuildManager(d.BuilderBackend(), d.IdentityMapping())
 	if err != nil {
-		return opts, err
+		return routerOptions{}, err
 	}
 	cgroupParent := newCgroupParent(config)
-	ro := routerOptions{
-		sessionManager: sm,
-		features:       d.Features,
-		daemon:         d,
-	}
 
 	bk, err := buildkit.New(ctx, buildkit.Opt{
 		SessionManager:      sm,
@@ -429,18 +438,22 @@ func newRouterOptions(ctx context.Context, config *config.Config, d *daemon.Daem
 		ContainerdNamespace: config.ContainerdNamespace,
 	})
 	if err != nil {
-		return opts, err
+		return routerOptions{}, err
 	}
 
 	bb, err := buildbackend.NewBackend(d.ImageService(), manager, bk, d.EventsService)
 	if err != nil {
-		return opts, errors.Wrap(err, "failed to create buildmanager")
+		return routerOptions{}, errors.Wrap(err, "failed to create buildmanager")
 	}
 
-	ro.buildBackend = bb
-	ro.buildkit = bk
-
-	return ro, nil
+	return routerOptions{
+		sessionManager: sm,
+		buildBackend:   bb,
+		features:       d.Features,
+		buildkit:       bk,
+		daemon:         d,
+		cluster:        c,
+	}, nil
 }
 
 func (cli *DaemonCli) reloadConfig() {
@@ -611,9 +624,13 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 		// If CDISpecDirs is set to an empty string, we clear it to ensure that CDI is disabled.
 		conf.CDISpecDirs = nil
 	}
-	if !conf.Experimental {
-		// If experimental mode is not set, we clear the CDISpecDirs to ensure that CDI is disabled.
+	if !conf.Features["cdi"] {
+		// If the CDI feature is not enabled, we clear the CDISpecDirs to ensure that CDI is disabled.
 		conf.CDISpecDirs = nil
+	}
+
+	if err := loadCLIPlatformConfig(conf); err != nil {
+		return nil, err
 	}
 
 	return conf, nil
@@ -702,14 +719,15 @@ func (opts routerOptions) Build() []router.Router {
 	return routers
 }
 
-func initMiddlewares(s *apiserver.Server, cfg *config.Config, pluginStore plugingetter.PluginGetter) *authorization.Middleware {
-	v := dockerversion.Version
-
+func initMiddlewares(s *apiserver.Server, cfg *config.Config, pluginStore plugingetter.PluginGetter) (*authorization.Middleware, error) {
 	exp := middleware.NewExperimentalMiddleware(cfg.Experimental)
 	s.UseMiddleware(exp)
 
-	vm := middleware.NewVersionMiddleware(v, api.DefaultVersion, cfg.MinAPIVersion)
-	s.UseMiddleware(vm)
+	vm, err := middleware.NewVersionMiddleware(dockerversion.Version, api.DefaultVersion, cfg.MinAPIVersion)
+	if err != nil {
+		return nil, err
+	}
+	s.UseMiddleware(*vm)
 
 	if cfg.CorsHeaders != "" {
 		c := middleware.NewCORSMiddleware(cfg.CorsHeaders)
@@ -718,7 +736,7 @@ func initMiddlewares(s *apiserver.Server, cfg *config.Config, pluginStore plugin
 
 	authzMiddleware := authorization.NewMiddleware(cfg.AuthorizationPlugins, pluginStore)
 	s.UseMiddleware(authzMiddleware)
-	return authzMiddleware
+	return authzMiddleware, nil
 }
 
 func (cli *DaemonCli) getContainerdDaemonOpts() ([]supervisor.DaemonOpt, error) {
@@ -826,6 +844,7 @@ func loadListeners(cfg *config.Config, tlsConfig *tls.Config) ([]net.Listener, [
 		if proto == "tcp" && !authEnabled {
 			log.G(ctx).WithField("host", protoAddr).Warn("Binding to IP address without --tlsverify is insecure and gives root access on this machine to everyone who has access to your network.")
 			log.G(ctx).WithField("host", protoAddr).Warn("Binding to an IP address, even on localhost, can also give access to scripts run in a browser. Be safe out there!")
+			log.G(ctx).WithField("host", protoAddr).Warn("[DEPRECATION NOTICE] In future versions this will be a hard failure preventing the daemon from starting! Learn more at: https://docs.docker.com/go/api-security/")
 			time.Sleep(time.Second)
 
 			// If TLSVerify is explicitly set to false we'll take that as "Please let me shoot myself in the foot"

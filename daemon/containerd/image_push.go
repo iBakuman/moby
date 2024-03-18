@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd/content"
 	cerrdefs "github.com/containerd/containerd/errdefs"
@@ -19,6 +20,7 @@ import (
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/registry"
+	dimages "github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/internal/compatcontext"
 	"github.com/docker/docker/pkg/progress"
@@ -40,6 +42,12 @@ import (
 // to perform cross-repo mounts of the shared content when pushing to a different
 // repository on the same registry.
 func (i *ImageService) PushImage(ctx context.Context, sourceRef reference.Named, metaHeaders map[string][]string, authConfig *registry.AuthConfig, outStream io.Writer) (retErr error) {
+	start := time.Now()
+	defer func() {
+		if retErr == nil {
+			dimages.ImageActions.WithValues("push").UpdateSince(start)
+		}
+	}()
 	out := streamformatter.NewJSONProgressOutput(outStream, false)
 	progress.Messagef(out, "", "The push refers to repository [%s]", sourceRef.Name())
 
@@ -91,7 +99,7 @@ func (i *ImageService) pushRef(ctx context.Context, targetRef reference.Named, m
 		}
 	}()
 
-	img, err := i.client.ImageService().Get(ctx, targetRef.String())
+	img, err := i.images.Get(ctx, targetRef.String())
 	if err != nil {
 		if cerrdefs.IsNotFound(err) {
 			return errdefs.NotFound(fmt.Errorf("tag does not exist: %s", reference.FamiliarString(targetRef)))
@@ -100,7 +108,7 @@ func (i *ImageService) pushRef(ctx context.Context, targetRef reference.Named, m
 	}
 
 	target := img.Target
-	store := i.client.ContentStore()
+	store := i.content
 
 	resolver, tracker := i.newResolverFromAuthConfig(ctx, authConfig, targetRef)
 	pp := pushProgress{Tracker: tracker}

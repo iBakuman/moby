@@ -174,7 +174,9 @@ func NewDaemon(workingDir string, ops ...Option) (*Daemon, error) {
 		if err := os.Chown(d.execRoot, uid, gid); err != nil {
 			return nil, err
 		}
-		d.rootlessXDGRuntimeDir = filepath.Join(d.Folder, "xdgrun")
+		// $XDG_RUNTIME_DIR mustn't be too long, as ${XDG_RUNTIME_DIR/dockerd-rootless
+		// contains Unix sockets
+		d.rootlessXDGRuntimeDir = filepath.Join(os.TempDir(), "xdgrun-"+id)
 		if err := os.MkdirAll(d.rootlessXDGRuntimeDir, 0o700); err != nil {
 			return nil, err
 		}
@@ -333,6 +335,17 @@ func (d *Daemon) PollCheckLogs(ctx context.Context, match func(s string) bool) p
 func ScanLogsMatchString(contains string) func(string) bool {
 	return func(line string) bool {
 		return strings.Contains(line, contains)
+	}
+}
+
+// ScanLogsMatchCount returns a function that can be used to scan the daemon logs until the passed in matcher function matches `count` times
+func ScanLogsMatchCount(f func(string) bool, count int) func(string) bool {
+	matched := 0
+	return func(line string) bool {
+		if f(line) {
+			matched++
+		}
+		return matched == count
 	}
 }
 

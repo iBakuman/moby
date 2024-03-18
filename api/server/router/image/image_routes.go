@@ -15,8 +15,9 @@ import (
 	"github.com/docker/docker/api"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/filters"
-	opts "github.com/docker/docker/api/types/image"
+	imagetypes "github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/builder/remotecontext"
@@ -72,9 +73,9 @@ func (ir *imageRouter) postImagesCreate(ctx context.Context, w http.ResponseWrit
 		// Special case: "pull -a" may send an image name with a
 		// trailing :. This is ugly, but let's not break API
 		// compatibility.
-		image := strings.TrimSuffix(img, ":")
+		imgName := strings.TrimSuffix(img, ":")
 
-		ref, err := reference.ParseNormalizedNamed(image)
+		ref, err := reference.ParseNormalizedNamed(imgName)
 		if err != nil {
 			return errdefs.InvalidParameter(err)
 		}
@@ -189,7 +190,7 @@ func (ir *imageRouter) postImagesPush(ctx context.Context, w http.ResponseWriter
 
 	var ref reference.Named
 
-	// Tag is empty only in case ImagePushOptions.All is true.
+	// Tag is empty only in case PushOptions.All is true.
 	if tag != "" {
 		r, err := httputils.RepoTagReference(img, tag)
 		if err != nil {
@@ -285,7 +286,7 @@ func (ir *imageRouter) deleteImages(ctx context.Context, w http.ResponseWriter, 
 }
 
 func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWriter, r *http.Request, vars map[string]string) error {
-	img, err := ir.backend.GetImage(ctx, vars["name"], opts.GetImageOpts{Details: true})
+	img, err := ir.backend.GetImage(ctx, vars["name"], backend.GetImageOpts{Details: true})
 	if err != nil {
 		return err
 	}
@@ -298,6 +299,16 @@ func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWrite
 	version := httputils.VersionFromContext(ctx)
 	if versions.LessThan(version, "1.44") {
 		imageInspect.VirtualSize = imageInspect.Size //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.44.
+
+		if imageInspect.Created == "" {
+			// backwards compatibility for Created not existing returning "0001-01-01T00:00:00Z"
+			// https://github.com/moby/moby/issues/47368
+			imageInspect.Created = time.Time{}.Format(time.RFC3339Nano)
+		}
+	}
+	if versions.GreaterThanOrEqualTo(version, "1.45") {
+		imageInspect.Container = ""        //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
+		imageInspect.ContainerConfig = nil //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
 	}
 	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
 }
@@ -353,7 +364,7 @@ func (ir *imageRouter) toImageInspect(img *image.Image) (*types.ImageInspect, er
 			Data: img.Details.Metadata,
 		},
 		RootFS: rootFSToAPIType(img.RootFS),
-		Metadata: opts.Metadata{
+		Metadata: imagetypes.Metadata{
 			LastTagTime: img.Details.LastUpdated,
 		},
 	}, nil
@@ -395,7 +406,7 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		sharedSize = httputils.BoolValue(r, "shared-size")
 	}
 
-	images, err := ir.backend.Images(ctx, types.ImageListOptions{
+	images, err := ir.backend.Images(ctx, imagetypes.ListOptions{
 		All:        httputils.BoolValue(r, "all"),
 		Filters:    imageFilters,
 		SharedSize: sharedSize,
@@ -452,7 +463,7 @@ func (ir *imageRouter) postImagesTag(ctx context.Context, w http.ResponseWriter,
 		return errdefs.InvalidParameter(errors.New("refusing to create an ambiguous tag using digest algorithm as name"))
 	}
 
-	img, err := ir.backend.GetImage(ctx, vars["name"], opts.GetImageOpts{})
+	img, err := ir.backend.GetImage(ctx, vars["name"], backend.GetImageOpts{})
 	if err != nil {
 		return errdefs.NotFound(err)
 	}

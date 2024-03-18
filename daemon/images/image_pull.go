@@ -9,7 +9,7 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/log"
 	"github.com/distribution/reference"
-	imagetypes "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/backend"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/distribution"
 	progressutils "github.com/docker/docker/distribution/utils"
@@ -26,7 +26,7 @@ func (i *ImageService) PullImage(ctx context.Context, ref reference.Named, platf
 	start := time.Now()
 
 	err := i.pullImageWithReference(ctx, ref, platform, metaHeaders, authConfig, outStream)
-	imageActions.WithValues("pull").UpdateSince(start)
+	ImageActions.WithValues("pull").UpdateSince(start)
 	if err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func (i *ImageService) PullImage(ctx context.Context, ref reference.Named, platf
 		// we allow the image to have a non-matching architecture. The code
 		// below checks for this situation, and returns a warning to the client,
 		// as well as logging it to the daemon logs.
-		img, err := i.GetImage(ctx, ref.String(), imagetypes.GetImageOpts{Platform: platform})
+		img, err := i.GetImage(ctx, ref.String(), backend.GetImageOpts{Platform: platform})
 
 		// Note that this is a special case where GetImage returns both an image
 		// and an error: https://github.com/docker/docker/blob/v20.10.7/daemon/images/image.go#L175-L183

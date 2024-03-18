@@ -13,6 +13,7 @@ import (
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // MockBackend implements the builder.Backend interface for unit testing
@@ -45,11 +46,7 @@ func (m *MockBackend) CommitBuildStep(ctx context.Context, c backend.CommitConfi
 	return "", nil
 }
 
-func (m *MockBackend) ContainerKill(containerID string, sig string) error {
-	return nil
-}
-
-func (m *MockBackend) ContainerStart(ctx context.Context, containerID string, hostConfig *container.HostConfig, checkpoint string, checkpointDir string) error {
+func (m *MockBackend) ContainerStart(ctx context.Context, containerID string, checkpoint string, checkpointDir string) error {
 	return nil
 }
 
@@ -110,7 +107,7 @@ type mockImageCache struct {
 	getCacheFunc func(parentID string, cfg *container.Config) (string, error)
 }
 
-func (mic *mockImageCache) GetCache(parentID string, cfg *container.Config) (string, error) {
+func (mic *mockImageCache) GetCache(parentID string, cfg *container.Config, _ ocispec.Platform) (string, error) {
 	if mic.getCacheFunc != nil {
 		return mic.getCacheFunc(parentID, cfg)
 	}

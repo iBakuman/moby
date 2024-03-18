@@ -10,7 +10,6 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/libnetwork/datastore"
-	"github.com/docker/docker/libnetwork/discoverapi"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/types"
 )
@@ -43,17 +42,13 @@ type ipSubnet struct {
 // initStore drivers are responsible for caching their own persistent state
 func (d *driver) initStore(option map[string]interface{}) error {
 	if data, ok := option[netlabel.LocalKVClient]; ok {
-		var err error
-		dsc, ok := data.(discoverapi.DatastoreConfigData)
+		var ok bool
+		d.store, ok = data.(*datastore.Store)
 		if !ok {
 			return types.InternalErrorf("incorrect data in datastore configuration: %v", data)
 		}
-		d.store, err = datastore.FromConfig(dsc)
-		if err != nil {
-			return types.InternalErrorf("macvlan driver failed to initialize data store: %v", err)
-		}
 
-		err = d.populateNetworks()
+		err := d.populateNetworks()
 		if err != nil {
 			return err
 		}
@@ -68,7 +63,7 @@ func (d *driver) initStore(option map[string]interface{}) error {
 
 // populateNetworks is invoked at driver init to recreate persistently stored networks
 func (d *driver) populateNetworks() error {
-	kvol, err := d.store.List(datastore.Key(macvlanPrefix), &configuration{})
+	kvol, err := d.store.List(&configuration{})
 	if err != nil && err != datastore.ErrKeyNotFound {
 		return fmt.Errorf("failed to get macvlan network configurations from store: %v", err)
 	}
@@ -87,7 +82,7 @@ func (d *driver) populateNetworks() error {
 }
 
 func (d *driver) populateEndpoints() error {
-	kvol, err := d.store.List(datastore.Key(macvlanEndpointPrefix), &endpoint{})
+	kvol, err := d.store.List(&endpoint{})
 	if err != nil && err != datastore.ErrKeyNotFound {
 		return fmt.Errorf("failed to get macvlan endpoints from store: %v", err)
 	}
@@ -133,18 +128,8 @@ func (d *driver) storeDelete(kvObject datastore.KVObject) error {
 		log.G(context.TODO()).Debugf("macvlan store not initialized. kv object %s is not deleted from store", datastore.Key(kvObject.Key()...))
 		return nil
 	}
-retry:
-	if err := d.store.DeleteObjectAtomic(kvObject); err != nil {
-		if err == datastore.ErrKeyModified {
-			if err := d.store.GetObject(datastore.Key(kvObject.Key()...), kvObject); err != nil {
-				return fmt.Errorf("could not update the kvobject to latest when trying to delete: %v", err)
-			}
-			goto retry
-		}
-		return err
-	}
 
-	return nil
+	return d.store.DeleteObject(kvObject)
 }
 
 func (config *configuration) MarshalJSON() ([]byte, error) {

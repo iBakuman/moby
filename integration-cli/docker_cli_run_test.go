@@ -145,19 +145,19 @@ func (s *DockerCLIRunSuite) TestRunDetachedContainerIDPrinting(c *testing.T) {
 // the working directory should be set correctly
 func (s *DockerCLIRunSuite) TestRunWorkingDirectory(c *testing.T) {
 	dir := "/root"
-	image := "busybox"
+	const imgName = "busybox"
 	if testEnv.DaemonInfo.OSType == "windows" {
 		dir = `C:/Windows`
 	}
 
 	// First with -w
-	out := cli.DockerCmd(c, "run", "-w", dir, image, "pwd").Stdout()
+	out := cli.DockerCmd(c, "run", "-w", dir, imgName, "pwd").Stdout()
 	if strings.TrimSpace(out) != dir {
 		c.Errorf("-w failed to set working directory")
 	}
 
 	// Then with --workdir
-	out = cli.DockerCmd(c, "run", "--workdir", dir, image, "pwd").Stdout()
+	out = cli.DockerCmd(c, "run", "--workdir", dir, imgName, "pwd").Stdout()
 	if strings.TrimSpace(out) != dir {
 		c.Errorf("--workdir failed to set working directory")
 	}
@@ -166,14 +166,14 @@ func (s *DockerCLIRunSuite) TestRunWorkingDirectory(c *testing.T) {
 // pinging Google's DNS resolver should fail when we disable the networking
 func (s *DockerCLIRunSuite) TestRunWithoutNetworking(c *testing.T) {
 	count := "-c"
-	image := "busybox"
+	imgName := "busybox"
 	if testEnv.DaemonInfo.OSType == "windows" {
 		count = "-n"
-		image = testEnv.PlatformDefaults.BaseImage
+		imgName = testEnv.PlatformDefaults.BaseImage
 	}
 
 	// First using the long form --net
-	out, exitCode, err := dockerCmdWithError("run", "--net=none", image, "ping", count, "1", "8.8.8.8")
+	out, exitCode, err := dockerCmdWithError("run", "--net=none", imgName, "ping", count, "1", "8.8.8.8")
 	if err != nil && exitCode != 1 {
 		c.Fatal(out, err)
 	}
@@ -503,7 +503,7 @@ func (s *DockerCLIRunSuite) TestVolumesFromGetsProperMode(c *testing.T) {
 
 	cli.DockerCmd(c, "run", "--name", "parent", "-v", hostpath+":"+prefix+slash+"test:ro", "busybox", "true")
 
-	// Expect this "rw" mode to be be ignored since the inherited volume is "ro"
+	// Expect this "rw" mode to be ignored since the inherited volume is "ro"
 	if _, _, err := dockerCmdWithError("run", "--volumes-from", "parent:rw", "busybox", "touch", prefix+slash+"test"+slash+"file"); err == nil {
 		c.Fatal("Expected volumes-from to inherit read-only volume even when passing in `rw`")
 	}
@@ -623,18 +623,18 @@ func (s *DockerCLIRunSuite) TestRunCreateVolumeWithSymlink(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	workingDirectory, err := os.MkdirTemp("", "TestRunCreateVolumeWithSymlink")
 	assert.NilError(c, err)
-	image := "docker-test-createvolumewithsymlink"
+	const imgName = "docker-test-createvolumewithsymlink"
 
-	buildCmd := exec.Command(dockerBinary, "build", "-t", image, "-")
+	buildCmd := exec.Command(dockerBinary, "build", "-t", imgName, "-")
 	buildCmd.Stdin = strings.NewReader(`FROM busybox
 		RUN ln -s home /bar`)
 	buildCmd.Dir = workingDirectory
 	err = buildCmd.Run()
 	if err != nil {
-		c.Fatalf("could not build '%s': %v", image, err)
+		c.Fatalf("could not build '%s': %v", imgName, err)
 	}
 
-	_, exitCode, err := dockerCmdWithError("run", "-v", "/bar/foo", "--name", "test-createvolumewithsymlink", image, "sh", "-c", "mount | grep -q /home/foo")
+	_, exitCode, err := dockerCmdWithError("run", "-v", "/bar/foo", "--name", "test-createvolumewithsymlink", imgName, "sh", "-c", "mount | grep -q /home/foo")
 	if err != nil || exitCode != 0 {
 		c.Fatalf("[run] err: %v, exitcode: %d", err, exitCode)
 	}
@@ -1275,10 +1275,11 @@ func (s *DockerCLIRunSuite) TestRunDNSDefaultOptions(c *testing.T) {
 	}
 
 	actual := cli.DockerCmd(c, "run", "busybox", "cat", "/etc/resolv.conf").Combined()
-	// check that the actual defaults are appended to the commented out
-	// localhost resolver (which should be preserved)
+	actual = regexp.MustCompile("(?m)^#.*$").ReplaceAllString(actual, "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
 	// NOTE: if we ever change the defaults from google dns, this will break
-	expected := "#nameserver 127.0.2.1\n\nnameserver 8.8.8.8\nnameserver 8.8.4.4\n"
+	expected := "nameserver 8.8.8.8 nameserver 8.8.4.4"
+
 	if actual != expected {
 		c.Fatalf("expected resolv.conf be: %q, but was: %q", expected, actual)
 	}
@@ -1295,14 +1296,16 @@ func (s *DockerCLIRunSuite) TestRunDNSOptions(c *testing.T) {
 		c.Fatalf("Expected warning on stderr about localhost resolver, but got %q", result.Stderr())
 	}
 
-	actual := strings.ReplaceAll(strings.Trim(result.Stdout(), "\r\n"), "\n", " ")
-	if actual != "search mydomain nameserver 127.0.0.1 options ndots:9" {
-		c.Fatalf("expected 'search mydomain nameserver 127.0.0.1 options ndots:9', but says: %q", actual)
+	actual := regexp.MustCompile("(?m)^#.*$").ReplaceAllString(result.Stdout(), "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
+	if actual != "nameserver 127.0.0.1 search mydomain options ndots:9" {
+		c.Fatalf("nameserver 127.0.0.1 expected 'search mydomain options ndots:9', but says: %q", actual)
 	}
 
 	out := cli.DockerCmd(c, "run", "--dns=1.1.1.1", "--dns-search=.", "--dns-opt=ndots:3", "busybox", "cat", "/etc/resolv.conf").Combined()
 
-	actual = strings.ReplaceAll(strings.Trim(strings.Trim(out, "\r\n"), " "), "\n", " ")
+	actual = regexp.MustCompile("(?m)^#.*$").ReplaceAllString(out, "")
+	actual = strings.ReplaceAll(strings.Trim(strings.Trim(actual, "\r\n"), " "), "\n", " ")
 	if actual != "nameserver 1.1.1.1 options ndots:3" {
 		c.Fatalf("expected 'nameserver 1.1.1.1 options ndots:3', but says: %q", actual)
 	}
@@ -1312,9 +1315,10 @@ func (s *DockerCLIRunSuite) TestRunDNSRepeatOptions(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 	out := cli.DockerCmd(c, "run", "--dns=1.1.1.1", "--dns=2.2.2.2", "--dns-search=mydomain", "--dns-search=mydomain2", "--dns-opt=ndots:9", "--dns-opt=timeout:3", "busybox", "cat", "/etc/resolv.conf").Stdout()
 
-	actual := strings.ReplaceAll(strings.Trim(out, "\r\n"), "\n", " ")
-	if actual != "search mydomain mydomain2 nameserver 1.1.1.1 nameserver 2.2.2.2 options ndots:9 timeout:3" {
-		c.Fatalf("expected 'search mydomain mydomain2 nameserver 1.1.1.1 nameserver 2.2.2.2 options ndots:9 timeout:3', but says: %q", actual)
+	actual := regexp.MustCompile("(?m)^#.*$").ReplaceAllString(out, "")
+	actual = strings.ReplaceAll(strings.Trim(actual, "\r\n"), "\n", " ")
+	if actual != "nameserver 1.1.1.1 nameserver 2.2.2.2 search mydomain mydomain2 options ndots:9 timeout:3" {
+		c.Fatalf("expected 'nameserver 1.1.1.1 nameserver 2.2.2.2 search mydomain mydomain2 options ndots:9 timeout:3', but says: %q", actual)
 	}
 }
 
@@ -1934,9 +1938,9 @@ func (s *DockerCLIRunSuite) TestRunCidFileCleanupIfEmpty(c *testing.T) {
 	tmpCidFile := path.Join(tmpDir, "cid")
 
 	// This must be an image that has no CMD or ENTRYPOINT set
-	image := loadSpecialImage(c, specialimage.EmptyFS)
+	imgRef := loadSpecialImage(c, specialimage.EmptyFS)
 
-	out, _, err := dockerCmdWithError("run", "--cidfile", tmpCidFile, image)
+	out, _, err := dockerCmdWithError("run", "--cidfile", tmpCidFile, imgRef)
 	if err == nil {
 		c.Fatalf("Run without command must fail. out=%s", out)
 	} else if !strings.Contains(out, "no command specified") {
@@ -4408,7 +4412,7 @@ func (s *DockerCLIRunSuite) TestRunMount(c *testing.T) {
 func (s *DockerCLIRunSuite) TestRunHostnameFQDN(c *testing.T) {
 	testRequires(c, DaemonIsLinux)
 
-	expectedOutput := "foobar.example.com\nfoobar.example.com\nfoobar\nexample.com\nfoobar.example.com"
+	expectedOutput := "foobar.example.com\nfoobar.example.com\nfoobar\nexample.com\nfoobar.example.com" //nolint:dupword
 	out := cli.DockerCmd(c, "run", "--hostname=foobar.example.com", "busybox", "sh", "-c", `cat /etc/hostname && hostname && hostname -s && hostname -d && hostname -f`).Combined()
 	assert.Equal(c, strings.TrimSpace(out), expectedOutput)
 
@@ -4421,7 +4425,7 @@ func (s *DockerCLIRunSuite) TestRunHostnameFQDN(c *testing.T) {
 func (s *DockerCLIRunSuite) TestRunHostnameInHostMode(c *testing.T) {
 	testRequires(c, DaemonIsLinux, NotUserNamespace)
 
-	const expectedOutput = "foobar\nfoobar"
+	const expectedOutput = "foobar\nfoobar" //nolint:dupword
 	out := cli.DockerCmd(c, "run", "--net=host", "--hostname=foobar", "busybox", "sh", "-c", `echo $HOSTNAME && hostname`).Combined()
 	assert.Equal(c, strings.TrimSpace(out), expectedOutput)
 }

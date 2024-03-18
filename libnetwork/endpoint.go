@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.19
+
 package libnetwork
 
 import (
@@ -16,6 +19,47 @@ import (
 	"github.com/docker/docker/libnetwork/scope"
 	"github.com/docker/docker/libnetwork/types"
 )
+
+// ByNetworkType sorts a [Endpoint] slice based on the network-type
+// they're attached to. It implements [sort.Interface] and can be used
+// with [sort.Stable] or [sort.Sort]. It is used by [Sandbox.ResolveName]
+// when resolving names in swarm mode. In swarm mode, services with exposed
+// ports are connected to user overlay network, ingress network, and local
+// ("docker_gwbridge") networks. Name resolution should prioritize returning
+// the VIP/IPs on user overlay network over ingress and local networks.
+//
+// ByNetworkType re-orders the endpoints based on the network-type they
+// are attached to:
+//
+//  1. dynamic networks (user overlay networks)
+//  2. ingress network(s)
+//  3. local networks ("docker_gwbridge")
+type ByNetworkType []*Endpoint
+
+func (ep ByNetworkType) Len() int      { return len(ep) }
+func (ep ByNetworkType) Swap(i, j int) { ep[i], ep[j] = ep[j], ep[i] }
+func (ep ByNetworkType) Less(i, j int) bool {
+	return getNetworkType(ep[i].getNetwork()) < getNetworkType(ep[j].getNetwork())
+}
+
+// Define the order in which resolution should happen if an endpoint is
+// attached to multiple network-types. It is used by [ByNetworkType].
+const (
+	typeDynamic = iota
+	typeIngress
+	typeLocal
+)
+
+func getNetworkType(nw *Network) int {
+	switch {
+	case nw.ingress:
+		return typeIngress
+	case nw.dynamic:
+		return typeDynamic
+	default:
+		return typeLocal
+	}
+}
 
 // EndpointOption is an option setter function type used to pass various options to Network
 // and Endpoint interfaces methods. The various setter functions of type EndpointOption are
@@ -478,18 +522,8 @@ func (ep *Endpoint) sbJoin(sb *Sandbox, options ...EndpointOption) (err error) {
 		}
 	}
 
-	// Do not update hosts file with internal networks endpoint IP
-	if !n.ingress && n.Name() != libnGWNetwork {
-		var addresses []string
-		if ip := ep.getFirstInterfaceIPv4Address(); ip != nil {
-			addresses = append(addresses, ip.String())
-		}
-		if ip := ep.getFirstInterfaceIPv6Address(); ip != nil {
-			addresses = append(addresses, ip.String())
-		}
-		if err = sb.updateHostsFile(addresses); err != nil {
-			return err
-		}
+	if err := sb.updateHostsFile(ep.getEtcHostsAddrs()); err != nil {
+		return err
 	}
 	if err = sb.updateDNS(n.enableIPv6); err != nil {
 		return err
@@ -639,7 +673,7 @@ func (ep *Endpoint) hasInterface(iName string) bool {
 }
 
 // Leave detaches the network resources populated in the sandbox.
-func (ep *Endpoint) Leave(sb *Sandbox, options ...EndpointOption) error {
+func (ep *Endpoint) Leave(sb *Sandbox) error {
 	if sb == nil || sb.ID() == "" || sb.Key() == "" {
 		return types.InvalidParameterErrorf("invalid Sandbox passed to endpoint leave: %v", sb)
 	}
@@ -647,10 +681,10 @@ func (ep *Endpoint) Leave(sb *Sandbox, options ...EndpointOption) error {
 	sb.joinLeaveStart()
 	defer sb.joinLeaveEnd()
 
-	return ep.sbLeave(sb, false, options...)
+	return ep.sbLeave(sb, false)
 }
 
-func (ep *Endpoint) sbLeave(sb *Sandbox, force bool, options ...EndpointOption) error {
+func (ep *Endpoint) sbLeave(sb *Sandbox, force bool) error {
 	n, err := ep.getNetworkFromStore()
 	if err != nil {
 		return fmt.Errorf("failed to get network from store during leave: %v", err)
@@ -671,8 +705,6 @@ func (ep *Endpoint) sbLeave(sb *Sandbox, force bool, options ...EndpointOption) 
 	if sid != sb.ID() {
 		return types.ForbiddenErrorf("unexpected sandbox ID in leave request. Expected %s. Got %s", ep.sandboxID, sb.ID())
 	}
-
-	ep.processOptions(options...)
 
 	d, err := n.driver(!force)
 	if err != nil {
@@ -860,26 +892,24 @@ func (ep *Endpoint) getSandbox() (*Sandbox, bool) {
 	return ps, ok
 }
 
-func (ep *Endpoint) getFirstInterfaceIPv4Address() net.IP {
+// Return a list of this endpoint's addresses to add to '/etc/hosts'.
+func (ep *Endpoint) getEtcHostsAddrs() []string {
 	ep.mu.Lock()
 	defer ep.mu.Unlock()
 
+	// Do not update hosts file with internal network's endpoint IP
+	if n := ep.network; n == nil || n.ingress || n.Name() == libnGWNetwork {
+		return nil
+	}
+
+	var addresses []string
 	if ep.iface.addr != nil {
-		return ep.iface.addr.IP
+		addresses = append(addresses, ep.iface.addr.IP.String())
 	}
-
-	return nil
-}
-
-func (ep *Endpoint) getFirstInterfaceIPv6Address() net.IP {
-	ep.mu.Lock()
-	defer ep.mu.Unlock()
-
 	if ep.iface.addrv6 != nil {
-		return ep.iface.addrv6.IP
+		addresses = append(addresses, ep.iface.addrv6.IP.String())
 	}
-
-	return nil
+	return addresses
 }
 
 // EndpointOptionGeneric function returns an option setter for a Generic option defined

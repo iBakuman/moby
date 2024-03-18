@@ -16,6 +16,9 @@ export VALIDATE_REPO
 export VALIDATE_BRANCH
 export VALIDATE_ORIGIN_BRANCH
 
+export PAGER
+export GIT_PAGER
+
 # env vars passed through directly to Docker's build scripts
 # to allow things like `make KEEPBUNDLE=1 binary` easily
 # `project/PACKAGERS.md` have some limited documentation of some of these
@@ -77,6 +80,8 @@ DOCKER_ENVS := \
 	-e DEFAULT_PRODUCT_LICENSE \
 	-e PRODUCT \
 	-e PACKAGER_NAME \
+	-e PAGER \
+	-e GIT_PAGER \
 	-e OTEL_EXPORTER_OTLP_ENDPOINT \
 	-e OTEL_EXPORTER_OTLP_PROTOCOL \
 	-e OTEL_SERVICE_NAME
@@ -250,6 +255,10 @@ swagger-docs: ## preview the API documentation
 .PHONY: generate-files
 generate-files:
 	$(eval $@_TMP_OUT := $(shell mktemp -d -t moby-output.XXXXXXXXXX))
+	@if [ -z "$($@_TMP_OUT)" ]; then \
+		echo "Temp dir is not set"; \
+		exit 1; \
+	fi
 	$(BUILD_CMD) --target "update" \
 		--output "type=local,dest=$($@_TMP_OUT)" \
 		--file "./hack/dockerfiles/generate-files.Dockerfile" .

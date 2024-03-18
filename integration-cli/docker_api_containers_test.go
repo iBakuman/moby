@@ -958,81 +958,6 @@ func (s *DockerAPISuite) TestContainerAPICopyNotExistsAnyMore(c *testing.T) {
 	assert.Equal(c, res.StatusCode, http.StatusNotFound)
 }
 
-func (s *DockerAPISuite) TestContainerAPICopyPre124(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only supports 1.25 or later
-	const name = "test-container-api-copy"
-	cli.DockerCmd(c, "run", "--name", name, "busybox", "touch", "/test.txt")
-
-	postData := types.CopyConfig{
-		Resource: "/test.txt",
-	}
-
-	res, body, err := request.Post(testutil.GetContext(c), "/v1.23/containers/"+name+"/copy", request.JSONBody(postData))
-	assert.NilError(c, err)
-	assert.Equal(c, res.StatusCode, http.StatusOK)
-
-	found := false
-	for tarReader := tar.NewReader(body); ; {
-		h, err := tarReader.Next()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			c.Fatal(err)
-		}
-		if h.Name == "test.txt" {
-			found = true
-			break
-		}
-	}
-	assert.Assert(c, found)
-}
-
-func (s *DockerAPISuite) TestContainerAPICopyResourcePathEmptyPre124(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only supports 1.25 or later
-	const name = "test-container-api-copy-resource-empty"
-	cli.DockerCmd(c, "run", "--name", name, "busybox", "touch", "/test.txt")
-
-	postData := types.CopyConfig{
-		Resource: "",
-	}
-
-	res, body, err := request.Post(testutil.GetContext(c), "/v1.23/containers/"+name+"/copy", request.JSONBody(postData))
-	assert.NilError(c, err)
-	assert.Equal(c, res.StatusCode, http.StatusBadRequest)
-	b, err := request.ReadBody(body)
-	assert.NilError(c, err)
-	assert.Assert(c, is.Regexp("^Path cannot be empty\n$", string(b)))
-}
-
-func (s *DockerAPISuite) TestContainerAPICopyResourcePathNotFoundPre124(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only supports 1.25 or later
-	const name = "test-container-api-copy-resource-not-found"
-	cli.DockerCmd(c, "run", "--name", name, "busybox")
-
-	postData := types.CopyConfig{
-		Resource: "/notexist",
-	}
-
-	res, body, err := request.Post(testutil.GetContext(c), "/v1.23/containers/"+name+"/copy", request.JSONBody(postData))
-	assert.NilError(c, err)
-	assert.Equal(c, res.StatusCode, http.StatusNotFound)
-	b, err := request.ReadBody(body)
-	assert.NilError(c, err)
-	assert.Assert(c, is.Regexp("^Could not find the file /notexist in container "+name+"\n$", string(b)))
-}
-
-func (s *DockerAPISuite) TestContainerAPICopyContainerNotFoundPr124(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only supports 1.25 or later
-	postData := types.CopyConfig{
-		Resource: "/something",
-	}
-
-	res, _, err := request.Post(testutil.GetContext(c), "/v1.23/containers/notexists/copy", request.JSONBody(postData))
-	assert.NilError(c, err)
-	assert.Equal(c, res.StatusCode, http.StatusNotFound)
-}
-
 func (s *DockerAPISuite) TestContainerAPIDelete(c *testing.T) {
 	id := runSleepingContainer(c)
 	cli.WaitRun(c, id)
@@ -1251,20 +1176,6 @@ func (s *DockerAPISuite) TestPostContainersCreateWithStringOrSliceCapAddDrop(c *
 	assert.NilError(c, err)
 }
 
-// #14915
-func (s *DockerAPISuite) TestContainerAPICreateNoHostConfig118(c *testing.T) {
-	testRequires(c, DaemonIsLinux) // Windows only support 1.25 or later
-	config := container.Config{
-		Image: "busybox",
-	}
-
-	apiClient, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("v1.18"))
-	assert.NilError(c, err)
-
-	_, err = apiClient.ContainerCreate(testutil.GetContext(c), &config, &container.HostConfig{}, &network.NetworkingConfig{}, nil, "")
-	assert.NilError(c, err)
-}
-
 // Ensure an error occurs when you have a container read-only rootfs but you
 // extract an archive to a symlink in a writable volume which points to a
 // directory outside of the volume.
@@ -1287,7 +1198,7 @@ func (s *DockerAPISuite) TestPutContainerArchiveErrSymlinkInVolumeToReadOnlyRoot
 	// Attempt to extract to a symlink in the volume which points to a
 	// directory outside the volume. This should cause an error because the
 	// rootfs is read-only.
-	apiClient, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("v1.20"))
+	apiClient, err := client.NewClientWithOpts(client.FromEnv)
 	assert.NilError(c, err)
 
 	err = apiClient.CopyToContainer(testutil.GetContext(c), cID, "/vol2/symlinkToAbsDir", nil, types.CopyToContainerOptions{})
@@ -1971,22 +1882,22 @@ func (s *DockerAPISuite) TestContainersAPICreateMountsCreate(c *testing.T) {
 			assert.NilError(c, err)
 			defer os.RemoveAll(tmpDir3)
 
-			assert.Assert(c, mountWrapper(tmpDir3, tmpDir3, "none", "bind,shared") == nil)
-
-			cases = append(cases, []testCase{
-				{
-					spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath},
-					expected: types.MountPoint{Type: "bind", RW: true, Destination: destPath, Source: tmpDir3},
-				},
-				{
-					spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath, ReadOnly: true},
-					expected: types.MountPoint{Type: "bind", RW: false, Destination: destPath, Source: tmpDir3},
-				},
-				{
-					spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath, ReadOnly: true, BindOptions: &mount.BindOptions{Propagation: "shared"}},
-					expected: types.MountPoint{Type: "bind", RW: false, Destination: destPath, Source: tmpDir3, Propagation: "shared"},
-				},
-			}...)
+			if assert.Check(c, mountWrapper(c, tmpDir3, tmpDir3, "none", "bind,shared")) {
+				cases = append(cases, []testCase{
+					{
+						spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath},
+						expected: types.MountPoint{Type: "bind", RW: true, Destination: destPath, Source: tmpDir3},
+					},
+					{
+						spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath, ReadOnly: true},
+						expected: types.MountPoint{Type: "bind", RW: false, Destination: destPath, Source: tmpDir3},
+					},
+					{
+						spec:     mount.Mount{Type: "bind", Source: tmpDir3, Target: destPath, ReadOnly: true, BindOptions: &mount.BindOptions{Propagation: "shared"}},
+						expected: types.MountPoint{Type: "bind", RW: false, Destination: destPath, Source: tmpDir3, Propagation: "shared"},
+					},
+				}...)
+			}
 		}
 	}
 

@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/docker/docker/libnetwork/discoverapi"
 	store "github.com/docker/docker/libnetwork/internal/kvstore"
 	"github.com/docker/docker/libnetwork/internal/kvstore/boltdb"
 	"github.com/docker/docker/libnetwork/types"
@@ -129,8 +128,7 @@ func newClient(kv string, addr string, config *store.Config) (*Store, error) {
 		config = &store.Config{}
 	}
 
-	// Parse file path
-	s, err := boltdb.New(strings.Split(addr, ","), config)
+	s, err := boltdb.New(addr, config)
 	if err != nil {
 		return nil, err
 	}
@@ -147,32 +145,6 @@ func New(cfg ScopeCfg) (*Store, error) {
 	return newClient(cfg.Client.Provider, cfg.Client.Address, cfg.Client.Config)
 }
 
-// FromConfig creates a new instance of LibKV data store starting from the datastore config data.
-func FromConfig(dsc discoverapi.DatastoreConfigData) (*Store, error) {
-	var (
-		ok    bool
-		sCfgP *store.Config
-	)
-
-	sCfgP, ok = dsc.Config.(*store.Config)
-	if !ok && dsc.Config != nil {
-		return nil, fmt.Errorf("cannot parse store configuration: %v", dsc.Config)
-	}
-
-	ds, err := New(ScopeCfg{
-		Client: ScopeClientCfg{
-			Address:  dsc.Address,
-			Provider: dsc.Provider,
-			Config:   sCfgP,
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to construct datastore client from datastore configuration %v: %v", dsc, err)
-	}
-
-	return ds, err
-}
-
 // Close closes the data store.
 func (ds *Store) Close() {
 	ds.store.Close()
@@ -184,7 +156,7 @@ func (ds *Store) PutObjectAtomic(kvObject KVObject) error {
 	defer ds.mu.Unlock()
 
 	if kvObject == nil {
-		return types.InvalidParameterErrorf("invalid KV Object : nil")
+		return types.InvalidParameterErrorf("invalid KV Object: nil")
 	}
 
 	kvObjValue := kvObject.Value()
@@ -216,7 +188,7 @@ func (ds *Store) PutObjectAtomic(kvObject KVObject) error {
 }
 
 // GetObject gets data from the store and unmarshals to the specified object.
-func (ds *Store) GetObject(key string, o KVObject) error {
+func (ds *Store) GetObject(o KVObject) error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -236,7 +208,7 @@ func (ds *Store) ensureParent(parent string) error {
 
 // List returns of a list of KVObjects belonging to the parent key. The caller
 // must pass a KVObject of the same type as the objects that need to be listed.
-func (ds *Store) List(key string, kvObject KVObject) ([]KVObject, error) {
+func (ds *Store) List(kvObject KVObject) ([]KVObject, error) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
@@ -289,13 +261,36 @@ func (ds *Store) Map(key string, kvObject KVObject) (map[string]KVObject, error)
 	return results, nil
 }
 
+// DeleteObject deletes a kvObject from the on-disk DB and the in-memory cache.
+// Unlike DeleteObjectAtomic, it doesn't check the optimistic lock of the
+// passed kvObject.
+func (ds *Store) DeleteObject(kvObject KVObject) error {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+
+	if kvObject == nil {
+		return types.InvalidParameterErrorf("invalid KV Object: nil")
+	}
+
+	if !kvObject.Skip() {
+		if err := ds.store.Delete(Key(kvObject.Key()...)); err != nil {
+			return err
+		}
+	}
+
+	// cleanup the cache only if AtomicDelete went through successfully
+	// If persistent store is skipped, sequencing needs to
+	// happen in cache.
+	return ds.cache.del(kvObject, false)
+}
+
 // DeleteObjectAtomic performs atomic delete on a record.
 func (ds *Store) DeleteObjectAtomic(kvObject KVObject) error {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
 
 	if kvObject == nil {
-		return types.InvalidParameterErrorf("invalid KV Object : nil")
+		return types.InvalidParameterErrorf("invalid KV Object: nil")
 	}
 
 	previous := &store.KVPair{Key: Key(kvObject.Key()...), LastIndex: kvObject.Index()}

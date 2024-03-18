@@ -4,6 +4,7 @@ import (
 	"context"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -12,7 +13,6 @@ import (
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/pkg/userns"
-	"github.com/containerd/continuity/fs"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/moby/buildkit/executor"
@@ -125,7 +125,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 	}
 
 	opts = append(opts,
-		oci.WithProcessArgs(meta.Args...),
+		withProcessArgs(meta.Args...),
 		oci.WithEnv(meta.Env),
 		oci.WithProcessCwd(meta.Cwd),
 		oci.WithNewPrivileges,
@@ -197,7 +197,9 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 	}
 
 	if tracingSocket != "" {
-		s.Mounts = append(s.Mounts, getTracingSocketMount(tracingSocket))
+		if mount := getTracingSocketMount(tracingSocket); mount != nil {
+			s.Mounts = append(s.Mounts, *mount)
+		}
 	}
 
 	s.Mounts = dedupMounts(s.Mounts)
@@ -215,6 +217,7 @@ func GenerateSpec(ctx context.Context, meta executor.Meta, mounts []executor.Mou
 type mountRef struct {
 	mount   mount.Mount
 	unmount func() error
+	subRefs map[string]mountRef
 }
 
 type submounts struct {
@@ -230,12 +233,19 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 	}
 	h, err := hashstructure.Hash(m, hashstructure.FormatV2, nil)
 	if err != nil {
-		return mount.Mount{}, nil
+		return mount.Mount{}, err
 	}
 	if mr, ok := s.m[h]; ok {
-		sm, err := sub(mr.mount, subPath)
+		if sm, ok := mr.subRefs[subPath]; ok {
+			return sm.mount, nil
+		}
+		sm, unmount, err := sub(mr.mount, subPath)
 		if err != nil {
-			return mount.Mount{}, nil
+			return mount.Mount{}, err
+		}
+		mr.subRefs[subPath] = mountRef{
+			mount:   sm,
+			unmount: unmount,
 		}
 		return sm, nil
 	}
@@ -247,25 +257,37 @@ func (s *submounts) subMount(m mount.Mount, subPath string) (mount.Mount, error)
 		return mount.Mount{}, err
 	}
 
-	opts := []string{"rbind"}
-	for _, opt := range m.Options {
-		if opt == "ro" {
-			opts = append(opts, opt)
-		}
+	var mntType string
+	opts := []string{}
+	if m.ReadOnly() {
+		opts = append(opts, "ro")
+	}
+
+	if runtime.GOOS != "windows" {
+		// Windows uses a mechanism similar to bind mounts, but will err out if we request
+		// a mount type it does not understand. Leaving the mount type empty on Windows will
+		// yield the same result.
+		mntType = "bind"
+		opts = append(opts, "rbind")
 	}
 
 	s.m[h] = mountRef{
 		mount: mount.Mount{
 			Source:  mp,
-			Type:    "bind",
+			Type:    mntType,
 			Options: opts,
 		},
 		unmount: lm.Unmount,
+		subRefs: map[string]mountRef{},
 	}
 
-	sm, err := sub(s.m[h].mount, subPath)
+	sm, unmount, err := sub(s.m[h].mount, subPath)
 	if err != nil {
 		return mount.Mount{}, err
+	}
+	s.m[h].subRefs[subPath] = mountRef{
+		mount:   sm,
+		unmount: unmount,
 	}
 	return sm, nil
 }
@@ -276,31 +298,13 @@ func (s *submounts) cleanup() {
 	for _, m := range s.m {
 		func(m mountRef) {
 			go func() {
+				for _, sm := range m.subRefs {
+					sm.unmount()
+				}
 				m.unmount()
 				wg.Done()
 			}()
 		}(m)
 	}
 	wg.Wait()
-}
-
-func sub(m mount.Mount, subPath string) (mount.Mount, error) {
-	src, err := fs.RootPath(m.Source, subPath)
-	if err != nil {
-		return mount.Mount{}, err
-	}
-	m.Source = src
-	return m, nil
-}
-
-func specMapping(s []idtools.IDMap) []specs.LinuxIDMapping {
-	var ids []specs.LinuxIDMapping
-	for _, item := range s {
-		ids = append(ids, specs.LinuxIDMapping{
-			HostID:      uint32(item.HostID),
-			ContainerID: uint32(item.ContainerID),
-			Size:        uint32(item.Size),
-		})
-	}
-	return ids
 }

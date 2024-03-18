@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.19
+
 package daemon // import "github.com/docker/docker/daemon"
 
 import (
@@ -8,9 +11,9 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
+	containertypes "github.com/docker/docker/api/types/container"
 	networktypes "github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/api/types/versions/v1p20"
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/network"
@@ -25,10 +28,6 @@ import (
 // there is an error getting the data.
 func (daemon *Daemon) ContainerInspect(ctx context.Context, name string, size bool, version string) (interface{}, error) {
 	switch {
-	case versions.LessThan(version, "1.20"):
-		return daemon.containerInspectPre120(ctx, name)
-	case versions.Equal(version, "1.20"):
-		return daemon.containerInspect120(name)
 	case versions.LessThan(version, "1.45"):
 		ctr, err := daemon.ContainerInspectCurrent(ctx, name, size)
 		if err != nil {
@@ -36,8 +35,10 @@ func (daemon *Daemon) ContainerInspect(ctx context.Context, name string, size bo
 		}
 
 		shortCID := stringid.TruncateID(ctr.ID)
-		for _, ep := range ctr.NetworkSettings.Networks {
-			ep.Aliases = sliceutil.Dedup(append(ep.Aliases, shortCID, ctr.Config.Hostname))
+		for nwName, ep := range ctr.NetworkSettings.Networks {
+			if containertypes.NetworkMode(nwName).IsUserDefined() {
+				ep.Aliases = sliceutil.Dedup(append(ep.Aliases, shortCID, ctr.Config.Hostname))
+			}
 		}
 
 		return ctr, nil
@@ -111,35 +112,6 @@ func (daemon *Daemon) ContainerInspectCurrent(ctx context.Context, name string, 
 	}, nil
 }
 
-// containerInspect120 serializes the master version of a container into a json type.
-func (daemon *Daemon) containerInspect120(name string) (*v1p20.ContainerJSON, error) {
-	ctr, err := daemon.GetContainer(name)
-	if err != nil {
-		return nil, err
-	}
-
-	ctr.Lock()
-	defer ctr.Unlock()
-
-	base, err := daemon.getInspectData(&daemon.config().Config, ctr)
-	if err != nil {
-		return nil, err
-	}
-
-	return &v1p20.ContainerJSON{
-		ContainerJSONBase: base,
-		Mounts:            ctr.GetMountPoints(),
-		Config: &v1p20.ContainerConfig{
-			Config:          ctr.Config,
-			MacAddress:      ctr.Config.MacAddress, //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
-			NetworkDisabled: ctr.Config.NetworkDisabled,
-			ExposedPorts:    ctr.Config.ExposedPorts,
-			VolumeDriver:    ctr.HostConfig.VolumeDriver,
-		},
-		NetworkSettings: daemon.getBackwardsCompatibleNetworkSettings(ctr.NetworkSettings),
-	}, nil
-}
-
 func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *container.Container) (*types.ContainerJSONBase, error) {
 	// make a copy to play with
 	hostConfig := *container.HostConfig
@@ -159,8 +131,12 @@ func (daemon *Daemon) getInspectData(daemonCfg *config.Config, container *contai
 	// unversioned API endpoints.
 	if container.Config != nil && container.Config.MacAddress == "" { //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
 		if nwm := hostConfig.NetworkMode; nwm.IsDefault() || nwm.IsBridge() || nwm.IsUserDefined() {
-			if epConf, ok := container.NetworkSettings.Networks[nwm.NetworkName()]; ok {
-				container.Config.MacAddress = epConf.MacAddress //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
+			name := nwm.NetworkName()
+			if nwm.IsDefault() {
+				name = daemon.netController.Config().DefaultNetwork
+			}
+			if epConf, ok := container.NetworkSettings.Networks[name]; ok {
+				container.Config.MacAddress = epConf.DesiredMacAddress //nolint:staticcheck // ignore SA1019: field is deprecated, but still used on API < v1.44.
 			}
 		}
 	}
@@ -271,25 +247,6 @@ func (daemon *Daemon) ContainerExecInspect(id string) (*backend.ExecInspect, err
 		DetachKeys:    e.DetachKeys,
 		Pid:           pid,
 	}, nil
-}
-
-func (daemon *Daemon) getBackwardsCompatibleNetworkSettings(settings *network.Settings) *v1p20.NetworkSettings {
-	result := &v1p20.NetworkSettings{
-		NetworkSettingsBase: types.NetworkSettingsBase{
-			Bridge:                 settings.Bridge,
-			SandboxID:              settings.SandboxID,
-			SandboxKey:             settings.SandboxKey,
-			HairpinMode:            settings.HairpinMode,
-			LinkLocalIPv6Address:   settings.LinkLocalIPv6Address,
-			LinkLocalIPv6PrefixLen: settings.LinkLocalIPv6PrefixLen,
-			Ports:                  settings.Ports,
-			SecondaryIPAddresses:   settings.SecondaryIPAddresses,
-			SecondaryIPv6Addresses: settings.SecondaryIPv6Addresses,
-		},
-		DefaultNetworkSettings: daemon.getDefaultNetworkSettings(settings.Networks),
-	}
-
-	return result
 }
 
 // getDefaultNetworkSettings creates the deprecated structure that holds the information

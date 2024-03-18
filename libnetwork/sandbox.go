@@ -334,7 +334,7 @@ func (sb *Sandbox) removeEndpointRaw(ep *Endpoint) {
 	}
 }
 
-func (sb *Sandbox) getEndpoint(id string) *Endpoint {
+func (sb *Sandbox) GetEndpoint(id string) *Endpoint {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 
@@ -392,38 +392,6 @@ func (sb *Sandbox) ResolveService(ctx context.Context, name string) ([]*net.SRV,
 	return nil, nil
 }
 
-func getDynamicNwEndpoints(epList []*Endpoint) []*Endpoint {
-	eps := []*Endpoint{}
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if n.dynamic && !n.ingress {
-			eps = append(eps, ep)
-		}
-	}
-	return eps
-}
-
-func getIngressNwEndpoint(epList []*Endpoint) *Endpoint {
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if n.ingress {
-			return ep
-		}
-	}
-	return nil
-}
-
-func getLocalNwEndpoints(epList []*Endpoint) []*Endpoint {
-	eps := []*Endpoint{}
-	for _, ep := range epList {
-		n := ep.getNetwork()
-		if !n.dynamic && !n.ingress {
-			eps = append(eps, ep)
-		}
-	}
-	return eps
-}
-
 func (sb *Sandbox) ResolveName(ctx context.Context, name string, ipType int) ([]net.IP, bool) {
 	// Embedded server owns the docker network domain. Resolution should work
 	// for both container_name and container_name.network_name
@@ -455,18 +423,17 @@ func (sb *Sandbox) ResolveName(ctx context.Context, name string, ipType int) ([]
 
 	epList := sb.Endpoints()
 
-	// In swarm mode services with exposed ports are connected to user overlay
-	// network, ingress network and docker_gwbridge network. Name resolution
+	// In swarm mode, services with exposed ports are connected to user overlay
+	// network, ingress network and docker_gwbridge networks. Name resolution
 	// should prioritize returning the VIP/IPs on user overlay network.
-	newList := []*Endpoint{}
+	//
+	// Re-order the endpoints based on the network-type they're attached to;
+	//
+	//  1. dynamic networks (user overlay networks)
+	//  2. ingress network(s)
+	//  3. local networks ("docker_gwbridge")
 	if sb.controller.isSwarmNode() {
-		newList = append(newList, getDynamicNwEndpoints(epList)...)
-		ingressEP := getIngressNwEndpoint(epList)
-		if ingressEP != nil {
-			newList = append(newList, ingressEP)
-		}
-		newList = append(newList, getLocalNwEndpoints(epList)...)
-		epList = newList
+		sort.Sort(ByNetworkType(epList))
 	}
 
 	for i := 0; i < len(reqName); i++ {
@@ -587,7 +554,7 @@ func (sb *Sandbox) DisableService() (err error) {
 }
 
 func (sb *Sandbox) clearNetworkResources(origEp *Endpoint) error {
-	ep := sb.getEndpoint(origEp.id)
+	ep := sb.GetEndpoint(origEp.id)
 	if ep == nil {
 		return fmt.Errorf("could not find the sandbox endpoint data for endpoint %s",
 			origEp.id)

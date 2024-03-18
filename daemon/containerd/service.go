@@ -19,7 +19,6 @@ import (
 	dimages "github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/daemon/snapshotter"
 	"github.com/docker/docker/errdefs"
-	"github.com/docker/docker/image"
 	"github.com/docker/docker/layer"
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/docker/registry"
@@ -28,17 +27,18 @@ import (
 
 // ImageService implements daemon.ImageService
 type ImageService struct {
-	client          *containerd.Client
-	images          images.Store
-	content         content.Store
-	containers      container.Store
-	snapshotter     string
-	registryHosts   docker.RegistryHosts
-	registryService registryResolver
-	eventsService   *daemonevents.Events
-	pruneRunning    atomic.Bool
-	refCountMounter snapshotter.Mounter
-	idMapping       idtools.IdentityMapping
+	client              *containerd.Client
+	images              images.Store
+	content             content.Store
+	containers          container.Store
+	snapshotterServices map[string]snapshots.Snapshotter
+	snapshotter         string
+	registryHosts       docker.RegistryHosts
+	registryService     registryResolver
+	eventsService       *daemonevents.Events
+	pruneRunning        atomic.Bool
+	refCountMounter     snapshotter.Mounter
+	idMapping           idtools.IdentityMapping
 }
 
 type registryResolver interface {
@@ -62,9 +62,12 @@ type ImageServiceConfig struct {
 // NewService creates a new ImageService.
 func NewService(config ImageServiceConfig) *ImageService {
 	return &ImageService{
-		client:          config.Client,
-		images:          config.Client.ImageService(),
-		content:         config.Client.ContentStore(),
+		client:  config.Client,
+		images:  config.Client.ImageService(),
+		content: config.Client.ContentStore(),
+		snapshotterServices: map[string]snapshots.Snapshotter{
+			config.Snapshotter: config.Client.SnapshotService(config.Snapshotter),
+		},
 		containers:      config.Containers,
 		snapshotter:     config.Snapshotter,
 		registryHosts:   config.RegistryHosts,
@@ -73,6 +76,16 @@ func NewService(config ImageServiceConfig) *ImageService {
 		refCountMounter: config.RefCountMounter,
 		idMapping:       config.IDMapping,
 	}
+}
+
+func (i *ImageService) snapshotterService(snapshotter string) snapshots.Snapshotter {
+	s, ok := i.snapshotterServices[snapshotter]
+	if !ok {
+		s = i.client.SnapshotService(snapshotter)
+		i.snapshotterServices[snapshotter] = s
+	}
+
+	return s
 }
 
 // DistributionServices return services controlling daemon image storage.
@@ -154,11 +167,6 @@ func (i *ImageService) LayerDiskUsage(ctx context.Context) (int64, error) {
 // called from reload.go
 func (i *ImageService) UpdateConfig(maxDownloads, maxUploads int) {
 	log.G(context.TODO()).Warn("max downloads and uploads is not yet implemented with the containerd store")
-}
-
-// GetLayerFolders returns the layer folders from an image RootFS.
-func (i *ImageService) GetLayerFolders(img *image.Image, rwLayer layer.RWLayer) ([]string, error) {
-	return nil, errdefs.NotImplemented(errors.New("not implemented"))
 }
 
 // GetContainerLayerSize returns the real size & virtual size of the container.

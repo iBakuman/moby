@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/image"
 	_ "github.com/docker/docker/daemon/graphdriver/register" // register graph drivers
 	"github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/layer"
@@ -58,11 +59,11 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 		LayerStore: layerStore,
 	})
 
-	img := "test-garbage-collector"
+	const imgName = "test-garbage-collector"
 
 	// Build a image with multiple layers
 	dockerfile := `FROM busybox
-	RUN echo echo Running... > /run.sh`
+	RUN echo 'echo Running...' > /run.sh`
 	source := fakecontext.New(t, "", fakecontext.WithDockerfile(dockerfile))
 	defer source.Close()
 	resp, err := client.ImageBuild(ctx,
@@ -70,17 +71,17 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 		types.ImageBuildOptions{
 			Remove:      true,
 			ForceRemove: true,
-			Tags:        []string{img},
+			Tags:        []string{imgName},
 		})
 	assert.NilError(t, err)
 	_, err = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	assert.NilError(t, err)
-	image, _, err := client.ImageInspectWithRaw(ctx, img)
+	img, _, err := client.ImageInspectWithRaw(ctx, imgName)
 	assert.NilError(t, err)
 
 	// Mark latest image layer to immutable
-	data := image.GraphDriver.Data
+	data := img.GraphDriver.Data
 	file, _ := os.Open(data["UpperDir"])
 	attr := 0x00000010
 	fsflags := uintptr(0x40086602)
@@ -90,7 +91,7 @@ func TestRemoveImageGarbageCollector(t *testing.T) {
 
 	// Try to remove the image, it should generate error
 	// but marking layer back to mutable before checking errors (so we don't break CI server)
-	_, err = client.ImageRemove(ctx, img, types.ImageRemoveOptions{})
+	_, err = client.ImageRemove(ctx, imgName, image.RemoveOptions{})
 	attr = 0x00000000
 	argp = uintptr(unsafe.Pointer(&attr))
 	_, _, errno = syscall.Syscall(syscall.SYS_IOCTL, file.Fd(), fsflags, argp)

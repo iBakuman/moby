@@ -19,10 +19,10 @@ produces:
 consumes:
   - "application/json"
   - "text/plain"
-basePath: "/v1.44"
+basePath: "/v1.45"
 info:
   title: "Docker Engine API"
-  version: "1.44"
+  version: "1.45"
   x-logo:
     url: "https://docs.docker.com/assets/images/logo-docker-main.png"
   description: |
@@ -55,8 +55,8 @@ info:
     the URL is not supported by the daemon, a HTTP `400 Bad Request` error message
     is returned.
 
-    If you omit the version-prefix, the current version of the API (v1.44) is used.
-    For example, calling `/info` is the same as calling `/v1.44/info`. Using the
+    If you omit the version-prefix, the current version of the API (v1.45) is used.
+    For example, calling `/info` is the same as calling `/v1.45/info`. Using the
     API without a version-prefix is deprecated and will be removed in a future release.
 
     Engine releases in the near future should support this version of the API,
@@ -391,7 +391,11 @@ definitions:
           ReadOnlyNonRecursive:
             description: |
                Make the mount non-recursively read-only, but still leave the mount recursive
-               (unless NonRecursive is set to true in conjunction).
+               (unless NonRecursive is set to `true` in conjunction).
+
+               Addded in v1.44, before that version all read-only mounts were
+               non-recursive by default. To match the previous behaviour this
+               will default to `true` for clients on versions prior to v1.44.
             type: "boolean"
             default: false
           ReadOnlyForceRecursive:
@@ -423,6 +427,10 @@ definitions:
                 type: "object"
                 additionalProperties:
                   type: "string"
+          Subpath:
+            description: "Source path inside the volume. Must be relative without any back traversals."
+            type: "string"
+            example: "dir-inside-volume/subdirectory"
       TmpfsOptions:
         description: "Optional configuration for the `tmpfs` type."
         type: "object"
@@ -1398,7 +1406,8 @@ definitions:
     type: "object"
     properties:
       Bridge:
-        description: Name of the network's bridge (for example, `docker0`).
+        description: |
+          Name of the default bridge interface when dockerd's --bridge flag is set.
         type: "string"
         example: "docker0"
       SandboxID:
@@ -1408,34 +1417,40 @@ definitions:
       HairpinMode:
         description: |
           Indicates if hairpin NAT should be enabled on the virtual interface.
+
+          Deprecated: This field is never set and will be removed in a future release.
         type: "boolean"
         example: false
       LinkLocalIPv6Address:
-        description: IPv6 unicast address using the link-local prefix.
+        description: |
+          IPv6 unicast address using the link-local prefix.
+
+          Deprecated: This field is never set and will be removed in a future release.
         type: "string"
-        example: "fe80::42:acff:fe11:1"
+        example: ""
       LinkLocalIPv6PrefixLen:
-        description: Prefix length of the IPv6 unicast address.
+        description: |
+          Prefix length of the IPv6 unicast address.
+
+          Deprecated: This field is never set and will be removed in a future release.
         type: "integer"
-        example: "64"
+        example: ""
       Ports:
         $ref: "#/definitions/PortMap"
       SandboxKey:
-        description: SandboxKey identifies the sandbox
+        description: SandboxKey is the full path of the netns handle
         type: "string"
         example: "/var/run/docker/netns/8ab54b426c38"
 
-      # TODO is SecondaryIPAddresses actually used?
       SecondaryIPAddresses:
-        description: ""
+        description: "Deprecated: This field is never set and will be removed in a future release."
         type: "array"
         items:
           $ref: "#/definitions/Address"
         x-nullable: true
 
-      # TODO is SecondaryIPv6Addresses actually used?
       SecondaryIPv6Addresses:
-        description: ""
+        description: "Deprecated: This field is never set and will be removed in a future release."
         type: "array"
         items:
           $ref: "#/definitions/Address"
@@ -1736,8 +1751,12 @@ definitions:
         description: |
           Date and time at which the image was created, formatted in
           [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) format with nano-seconds.
+
+          This information is only available if present in the image,
+          and omitted otherwise.
         type: "string"
-        x-nullable: false
+        format: "dateTime"
+        x-nullable: true
         example: "2022-02-04T21:20:12.497794809Z"
       Container:
         description: |
@@ -8320,6 +8339,16 @@ paths:
           description: "BuildKit output configuration"
           type: "string"
           default: ""
+        - name: "version"
+          in: "query"
+          type: "string"
+          default: "1"
+          enum: ["1", "2"]
+          description: |
+            Version of the builder backend to use.
+
+            - `1` is the first generation classic (deprecated) builder in the Docker daemon (default)
+            - `2` is [BuildKit](https://github.com/moby/buildkit)
       responses:
         200:
           description: "no error"
@@ -8745,8 +8774,7 @@ paths:
 
                     <p><br /></p>
 
-                    > **Deprecated**: This field is deprecated and will always
-                    > be "false" in future.
+                    > **Deprecated**: This field is deprecated and will always be "false".
                   type: "boolean"
                   example: false
                 name:
@@ -8789,13 +8817,8 @@ paths:
           description: |
             A JSON encoded value of the filters (a `map[string][]string`) to process on the images list. Available filters:
 
-            - `is-automated=(true|false)` (deprecated, see below)
             - `is-official=(true|false)`
             - `stars=<number>` Matches images that has at least 'number' stars.
-
-            The `is-automated` filter is deprecated. The `is_automated` field has
-            been deprecated by Docker Hub's search API. Consequently, searching
-            for `is-automated=true` will yield no results.
           type: "string"
       tags: ["Image"]
   /images/prune:

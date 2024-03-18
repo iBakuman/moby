@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd"
 	cerrdefs "github.com/containerd/containerd/errdefs"
@@ -16,18 +18,26 @@ import (
 	"github.com/distribution/reference"
 	"github.com/docker/docker/api/types/events"
 	registrytypes "github.com/docker/docker/api/types/registry"
+	dimages "github.com/docker/docker/daemon/images"
 	"github.com/docker/docker/distribution"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/internal/compatcontext"
 	"github.com/docker/docker/pkg/progress"
 	"github.com/docker/docker/pkg/streamformatter"
+	"github.com/docker/docker/pkg/stringid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 )
 
 // PullImage initiates a pull operation. baseRef is the image to pull.
 // If reference is not tagged, all tags are pulled.
-func (i *ImageService) PullImage(ctx context.Context, baseRef reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registrytypes.AuthConfig, outStream io.Writer) error {
+func (i *ImageService) PullImage(ctx context.Context, baseRef reference.Named, platform *ocispec.Platform, metaHeaders map[string][]string, authConfig *registrytypes.AuthConfig, outStream io.Writer) (retErr error) {
+	start := time.Now()
+	defer func() {
+		if retErr == nil {
+			dimages.ImageActions.WithValues("pull").UpdateSince(start)
+		}
+	}()
 	out := streamformatter.NewJSONProgressOutput(outStream, false)
 
 	if !reference.IsNameOnly(baseRef) {
@@ -88,7 +98,7 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 	})
 	opts = append(opts, containerd.WithImageHandler(h))
 
-	pp := pullProgress{store: i.client.ContentStore(), showExists: true}
+	pp := pullProgress{store: i.content, showExists: true}
 	finishProgress := jobs.showProgress(ctx, out, pp)
 
 	var outNewImg *containerd.Image
@@ -114,8 +124,17 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 	var sentPullingFrom, sentSchema1Deprecation bool
 	ah := images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
 		if desc.MediaType == images.MediaTypeDockerSchema1Manifest && !sentSchema1Deprecation {
-			progress.Message(out, "", distribution.DeprecatedSchema1ImageMessage(ref))
+			err := distribution.DeprecatedSchema1ImageError(ref)
+			if os.Getenv("DOCKER_ENABLE_DEPRECATED_PULL_SCHEMA_1_IMAGE") == "" {
+				log.G(context.TODO()).Warn(err.Error())
+				return nil, err
+			}
+			progress.Message(out, "", err.Error())
 			sentSchema1Deprecation = true
+		}
+		if images.IsLayerType(desc.MediaType) {
+			id := stringid.TruncateID(desc.Digest.String())
+			progress.Update(out, id, "Pulling fs layer")
 		}
 		if images.IsManifestType(desc.MediaType) {
 			if !sentPullingFrom {
@@ -129,7 +148,7 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 				sentPullingFrom = true
 			}
 
-			available, _, _, missing, err := images.Check(ctx, i.client.ContentStore(), desc, p)
+			available, _, _, missing, err := images.Check(ctx, i.content, desc, p)
 			if err != nil {
 				return nil, err
 			}
@@ -176,7 +195,7 @@ func (i *ImageService) pullTag(ctx context.Context, ref reference.Named, platfor
 	logger.Info("image pulled")
 
 	// The pull succeeded, so try to remove any dangling image we have for this target
-	err = i.client.ImageService().Delete(compatcontext.WithoutCancel(ctx), danglingImageName(img.Target().Digest))
+	err = i.images.Delete(compatcontext.WithoutCancel(ctx), danglingImageName(img.Target().Digest))
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		// Image pull succeeded, but cleaning up the dangling image failed. Ignore the
 		// error to not mark the pull as failed.

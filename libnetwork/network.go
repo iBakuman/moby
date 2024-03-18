@@ -83,7 +83,7 @@ type IpamConf struct {
 	// PreferredPool is the master address pool for containers and network interfaces.
 	PreferredPool string
 	// SubPool is a subset of the master pool. If specified,
-	// this becomes the container pool.
+	// this becomes the container pool for automatic address allocations.
 	SubPool string
 	// Gateway is the preferred Network Gateway address (optional).
 	Gateway string
@@ -100,7 +100,7 @@ func (c *IpamConf) Validate() error {
 	return nil
 }
 
-// Contains checks whether the ipamSubnet contains [addr].
+// Contains checks whether the ipam master address pool contains [addr].
 func (c *IpamConf) Contains(addr net.IP) bool {
 	if c == nil {
 		return false
@@ -110,9 +110,6 @@ func (c *IpamConf) Contains(addr net.IP) bool {
 	}
 
 	_, allowedRange, _ := net.ParseCIDR(c.PreferredPool)
-	if c.SubPool != "" {
-		_, allowedRange, _ = net.ParseCIDR(c.SubPool)
-	}
 
 	return allowedRange.Contains(addr)
 }
@@ -1279,8 +1276,8 @@ func (n *Network) EndpointByName(name string) (*Endpoint, error) {
 	return e, nil
 }
 
-// EndpointByID returns the Endpoint which has the passed id. If not found,
-// the error ErrNoSuchEndpoint is returned.
+// EndpointByID should *never* be called as it's going to create a 2nd instance of an Endpoint. The first one lives in
+// the Sandbox the endpoint is attached to. Instead, the endpoint should be retrieved by calling [Sandbox.Endpoints()].
 func (n *Network) EndpointByID(id string) (*Endpoint, error) {
 	if id == "" {
 		return nil, ErrInvalidID(id)

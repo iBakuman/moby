@@ -3,6 +3,7 @@ package networking
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/docker/docker/integration/internal/network"
 	"github.com/docker/docker/testutil"
 	"github.com/docker/docker/testutil/daemon"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/skip"
@@ -36,7 +38,8 @@ func TestBridgeICC(t *testing.T) {
 		name           string
 		bridgeOpts     []func(*types.NetworkCreate)
 		ctr1MacAddress string
-		linkLocal      bool
+		isIPv6         bool
+		isLinkLocal    bool
 		pingHost       string
 	}{
 		{
@@ -55,6 +58,7 @@ func TestBridgeICC(t *testing.T) {
 				network.WithIPv6(),
 				network.WithIPAM("fdf1:a844:380c:b200::/64", "fdf1:a844:380c:b200::1"),
 			},
+			isIPv6: true,
 		},
 		{
 			name: "IPv6 ULA on internal network",
@@ -63,6 +67,7 @@ func TestBridgeICC(t *testing.T) {
 				network.WithInternal(),
 				network.WithIPAM("fdf1:a844:380c:b247::/64", "fdf1:a844:380c:b247::1"),
 			},
+			isIPv6: true,
 		},
 		{
 			name: "IPv6 link-local address on non-internal network",
@@ -74,7 +79,8 @@ func TestBridgeICC(t *testing.T) {
 				// 2. the one dynamically assigned by the IPAM driver.
 				network.WithIPAM("fe80::/64", "fe80::1"),
 			},
-			linkLocal: true,
+			isLinkLocal: true,
+			isIPv6:      true,
 		},
 		{
 			name: "IPv6 link-local address on internal network",
@@ -84,10 +90,11 @@ func TestBridgeICC(t *testing.T) {
 				// See the note above about link-local addresses.
 				network.WithIPAM("fe80::/64", "fe80::1"),
 			},
-			linkLocal: true,
+			isLinkLocal: true,
+			isIPv6:      true,
 		},
 		{
-			// As for 'LL non-internal', but ping the container by name instead of by address
+			// As for 'LL non-internal', ping the container by name instead of by address
 			// - the busybox test containers only have one interface with a link local
 			// address, so the zone index is not required:
 			//   RFC-4007, section 6: "[...] for nodes with only a single non-loopback
@@ -99,6 +106,7 @@ func TestBridgeICC(t *testing.T) {
 				network.WithIPv6(),
 				network.WithIPAM("fe80::/64", "fe80::1"),
 			},
+			isIPv6: true,
 		},
 		{
 			name: "IPv6 nonstandard link-local subnet on non-internal network ping by name",
@@ -111,6 +119,7 @@ func TestBridgeICC(t *testing.T) {
 				network.WithIPv6(),
 				network.WithIPAM("fe80:1234::/64", "fe80:1234::1"),
 			},
+			isIPv6: true,
 		},
 		{
 			name: "IPv6 non-internal network with SLAAC LL address",
@@ -122,6 +131,7 @@ func TestBridgeICC(t *testing.T) {
 			// specify one here to hardcode the SLAAC LL address below.
 			ctr1MacAddress: "02:42:ac:11:00:02",
 			pingHost:       "fe80::42:acff:fe11:2%eth0",
+			isIPv6:         true,
 		},
 		{
 			name: "IPv6 internal network with SLAAC LL address",
@@ -133,6 +143,7 @@ func TestBridgeICC(t *testing.T) {
 			// specify one here to hardcode the SLAAC LL address below.
 			ctr1MacAddress: "02:42:ac:11:00:02",
 			pingHost:       "fe80::42:acff:fe11:2%eth0",
+			isIPv6:         true,
 		},
 	}
 
@@ -162,7 +173,7 @@ func TestBridgeICC(t *testing.T) {
 
 			pingHost := tc.pingHost
 			if pingHost == "" {
-				if tc.linkLocal {
+				if tc.isLinkLocal {
 					inspect := container.Inspect(ctx, t, c, id1)
 					pingHost = inspect.NetworkSettings.Networks[bridgeName].GlobalIPv6Address + "%eth0"
 				} else {
@@ -170,7 +181,12 @@ func TestBridgeICC(t *testing.T) {
 				}
 			}
 
-			pingCmd := []string{"ping", "-c1", "-W3", pingHost}
+			ipv := "-4"
+			if tc.isIPv6 {
+				ipv = "-6"
+			}
+
+			pingCmd := []string{"ping", "-c1", "-W3", ipv, pingHost}
 
 			ctr2Name := fmt.Sprintf("ctr-icc-%d-2", tcID)
 			attachCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -187,6 +203,66 @@ func TestBridgeICC(t *testing.T) {
 			assert.Check(t, is.Equal(res.ExitCode, 0))
 			assert.Check(t, is.Equal(res.Stderr.Len(), 0))
 			assert.Check(t, is.Contains(res.Stdout.String(), "1 packets transmitted, 1 packets received"))
+		})
+	}
+}
+
+// TestBridgeICCWindows tries to ping container ctr1 from container ctr2 using its hostname.
+// Checks DNS resolution, and whether containers can communicate with each other.
+// Regression test for https://github.com/moby/moby/issues/47370
+func TestBridgeICCWindows(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType != "windows")
+
+	ctx := setupTest(t)
+	c := testEnv.APIClient()
+
+	testcases := []struct {
+		name    string
+		netName string
+	}{
+		{
+			name:    "Default nat network",
+			netName: "nat",
+		},
+		{
+			name:    "User defined nat network",
+			netName: "mynat",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+
+			if tc.netName != "nat" {
+				network.CreateNoError(ctx, t, c, tc.netName,
+					network.WithDriver("nat"),
+				)
+				defer network.RemoveNoError(ctx, t, c, tc.netName)
+			}
+
+			const ctr1Name = "ctr1"
+			id1 := container.Run(ctx, t, c,
+				container.WithName(ctr1Name),
+				container.WithNetworkMode(tc.netName),
+			)
+			defer c.ContainerRemove(ctx, id1, containertypes.RemoveOptions{Force: true})
+
+			pingCmd := []string{"ping", "-n", "1", "-w", "3000", ctr1Name}
+
+			const ctr2Name = "ctr2"
+			attachCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
+			res := container.RunAttach(attachCtx, t, c,
+				container.WithName(ctr2Name),
+				container.WithCmd(pingCmd...),
+				container.WithNetworkMode(tc.netName),
+			)
+			defer c.ContainerRemove(ctx, res.ContainerID, containertypes.RemoveOptions{Force: true})
+
+			assert.Check(t, is.Equal(res.ExitCode, 0))
+			assert.Check(t, is.Equal(res.Stderr.Len(), 0))
+			assert.Check(t, is.Contains(res.Stdout.String(), "Sent = 1, Received = 1, Lost = 0"))
 		})
 	}
 }
@@ -473,6 +549,128 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 						assert.Check(t, is.Contains(stdout, expAddr))
 					}
 				}
+			}
+		})
+	}
+}
+
+// Test that a container on an 'internal' network has IP connectivity with
+// the host (on its own subnet, because the n/w bridge has an address on that
+// subnet, and it's in the host's namespace).
+// Regression test for https://github.com/moby/moby/issues/47329
+func TestInternalNwConnectivity(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+
+	ctx := setupTest(t)
+
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t, "-D", "--experimental", "--ip6tables")
+	defer d.Stop(t)
+
+	c := d.NewClientT(t)
+	defer c.Close()
+
+	const bridgeName = "intnw"
+	const gw4 = "172.30.0.1"
+	const gw6 = "fda9:4130:4715::1234"
+	network.CreateNoError(ctx, t, c, bridgeName,
+		network.WithInternal(),
+		network.WithIPv6(),
+		network.WithIPAM("172.30.0.0/24", gw4),
+		network.WithIPAM("fda9:4130:4715::/64", gw6),
+		network.WithDriver("bridge"),
+		network.WithOption("com.docker.network.bridge.name", bridgeName),
+	)
+	defer network.RemoveNoError(ctx, t, c, bridgeName)
+
+	const ctrName = "intctr"
+	id := container.Run(ctx, t, c,
+		container.WithName(ctrName),
+		container.WithImage("busybox:latest"),
+		container.WithCmd("top"),
+		container.WithNetworkMode(bridgeName),
+	)
+	defer c.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
+
+	execCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	res := container.ExecT(execCtx, t, c, id, []string{"ping", "-c1", "-W3", gw4})
+	assert.Check(t, is.Equal(res.ExitCode, 0))
+	assert.Check(t, is.Equal(res.Stderr(), ""))
+	assert.Check(t, is.Contains(res.Stdout(), "1 packets transmitted, 1 packets received"))
+
+	res = container.ExecT(execCtx, t, c, id, []string{"ping6", "-c1", "-W3", gw6})
+	assert.Check(t, is.Equal(res.ExitCode, 0))
+	assert.Check(t, is.Equal(res.Stderr(), ""))
+	assert.Check(t, is.Contains(res.Stdout(), "1 packets transmitted, 1 packets received"))
+
+	// Addresses outside the internal subnet must not be accessible.
+	res = container.ExecT(execCtx, t, c, id, []string{"ping", "-c1", "-W3", "8.8.8.8"})
+	assert.Check(t, is.Equal(res.ExitCode, 1))
+	assert.Check(t, is.Contains(res.Stderr(), "Network is unreachable"))
+}
+
+// Check that the container's interface has no IPv6 address when IPv6 is
+// disabled in a container via sysctl.
+func TestDisableIPv6Addrs(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+
+	c := d.NewClientT(t)
+	defer c.Close()
+
+	testcases := []struct {
+		name    string
+		sysctls map[string]string
+		expIPv6 bool
+	}{
+		{
+			name:    "IPv6 enabled",
+			expIPv6: true,
+		},
+		{
+			name:    "IPv6 disabled",
+			sysctls: map[string]string{"net.ipv6.conf.all.disable_ipv6": "1"},
+		},
+	}
+
+	const netName = "testnet"
+	network.CreateNoError(ctx, t, c, netName,
+		network.WithIPv6(),
+		network.WithIPAM("fda0:ef3d:6430:abcd::/64", "fda0:ef3d:6430:abcd::1"),
+	)
+	defer network.RemoveNoError(ctx, t, c, netName)
+
+	inet6RE := regexp.MustCompile(`inet6[ \t]+[0-9a-f:]*`)
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+
+			opts := []func(config *container.TestContainerConfig){
+				container.WithCmd("ip", "a"),
+				container.WithNetworkMode(netName),
+			}
+			if len(tc.sysctls) > 0 {
+				opts = append(opts, container.WithSysctls(tc.sysctls))
+			}
+
+			runRes := container.RunAttach(ctx, t, c, opts...)
+			defer c.ContainerRemove(ctx, runRes.ContainerID,
+				containertypes.RemoveOptions{Force: true},
+			)
+
+			stdout := runRes.Stdout.String()
+			inet6 := inet6RE.FindAllString(stdout, -1)
+			if tc.expIPv6 {
+				assert.Check(t, len(inet6) > 0, "Expected IPv6 addresses but found none.")
+			} else {
+				assert.Check(t, is.DeepEqual(inet6, []string{}, cmpopts.EquateEmpty()))
 			}
 		})
 	}

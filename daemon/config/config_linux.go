@@ -33,9 +33,6 @@ const (
 	// OCI runtime being shipped with the docker daemon package.
 	StockRuntimeName = "runc"
 
-	// minAPIVersion represents Minimum REST API version supported
-	minAPIVersion = "1.12"
-
 	// userlandProxyBinary is the name of the userland-proxy binary.
 	// In rootless-mode, [rootless.RootlessKitDockerProxyBinary] is used instead.
 	userlandProxyBinary = "docker-proxy"
@@ -83,7 +80,6 @@ type Config struct {
 	Ulimits              map[string]*units.Ulimit  `json:"default-ulimits,omitempty"`
 	CPURealtimePeriod    int64                     `json:"cpu-rt-period,omitempty"`
 	CPURealtimeRuntime   int64                     `json:"cpu-rt-runtime,omitempty"`
-	OOMScoreAdjust       int                       `json:"oom-score-adjust,omitempty"` // Deprecated: configure the daemon's oom-score-adjust using a process manager instead.
 	Init                 bool                      `json:"init,omitempty"`
 	InitPath             string                    `json:"init-path,omitempty"`
 	SeccompProfile       string                    `json:"seccomp-profile,omitempty"`
@@ -178,10 +174,6 @@ func verifyDefaultCgroupNsMode(mode string) error {
 
 // ValidatePlatformConfig checks if any platform-specific configuration settings are invalid.
 func (conf *Config) ValidatePlatformConfig() error {
-	if conf.OOMScoreAdjust != 0 {
-		return errors.New(`DEPRECATED: The "oom-score-adjust" config parameter and the dockerd "--oom-score-adjust" options have been removed.`)
-	}
-
 	if conf.EnableUserlandProxy {
 		if conf.UserlandProxyPath == "" {
 			return errors.New("invalid userland-proxy-path: userland-proxy is enabled, but userland-proxy-path is not set")
@@ -251,13 +243,17 @@ func setPlatformDefaults(cfg *Config) error {
 		var err error
 		cfg.BridgeConfig.UserlandProxyPath, err = exec.LookPath(userlandProxyBinary)
 		if err != nil {
-			// Log a warning, but don't error here. This allows running a daemon
-			// with userland-proxy disabled (which does not require the binary
+			// Log, but don't error here. This allows running a daemon with
+			// userland-proxy disabled (which does not require the binary
 			// to be present).
 			//
 			// An error is still produced by [Config.ValidatePlatformConfig] if
 			// userland-proxy is enabled in the configuration.
-			log.G(context.TODO()).WithError(err).Warn("failed to lookup default userland-proxy binary")
+			//
+			// We log this at "debug" level, as this code is also executed
+			// when running "--version", and we don't want to print logs in
+			// that case..
+			log.G(context.TODO()).WithError(err).Debug("failed to lookup default userland-proxy binary")
 		}
 		cfg.Root = "/var/lib/docker"
 		cfg.ExecRoot = "/var/run/docker"
