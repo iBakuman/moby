@@ -155,6 +155,9 @@ BUILD_OPTS := ${DOCKER_BUILD_ARGS} ${DOCKER_BUILD_OPTS}
 BUILD_CMD := $(BUILDX) build
 BAKE_CMD := $(BUILDX) bake
 
+print:
+	$(info DOCKER_ENV=$(DOCKER_ENVS))
+	$(info BIND_MOUNT=$(DOCKER_MOUNT))
 default: binary
 
 all: build ## validate all checks, build linux binaries, run all tests,\ncross build non-linux binaries, and generate archives
