@@ -1,6 +1,7 @@
 package reexec // import "github.com/docker/docker/pkg/reexec"
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"testing"
@@ -49,4 +50,12 @@ func TestNaiveSelf(t *testing.T) {
 
 	os.Args[0] = "mkdir"
 	assert.Check(t, naiveSelf() != os.Args[0])
+}
+
+func TestSymbolLink(t *testing.T) {
+	exePath, err := os.Readlink(Self())
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("current binary path: ", exePath)
 }
