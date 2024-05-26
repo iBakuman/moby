@@ -3,7 +3,9 @@ package networking
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ func TestBridgeICC(t *testing.T) {
 	ctx := setupTest(t)
 
 	d := daemon.New(t)
-	d.StartWithBusybox(ctx, t, "-D", "--experimental", "--ip6tables")
+	d.StartWithBusybox(ctx, t)
 	defer d.Stop(t)
 
 	c := d.NewClientT(t)
@@ -274,7 +276,7 @@ func TestBridgeINC(t *testing.T) {
 	ctx := setupTest(t)
 
 	d := daemon.New(t)
-	d.StartWithBusybox(ctx, t, "-D", "--experimental", "--ip6tables")
+	d.StartWithBusybox(ctx, t)
 	defer d.Stop(t)
 
 	c := d.NewClientT(t)
@@ -424,8 +426,6 @@ func TestDefaultBridgeIPv6(t *testing.T) {
 
 			d := daemon.New(t)
 			d.StartWithBusybox(ctx, t,
-				"--experimental",
-				"--ip6tables",
 				"--ipv6",
 				"--fixed-cidr-v6", tc.fixed_cidr_v6,
 			)
@@ -468,7 +468,6 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 
 	ctx := setupTest(t)
-	d := daemon.New(t)
 
 	type testStep struct {
 		stepName    string
@@ -486,13 +485,13 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 				{
 					stepName:    "Set up initial UL prefix",
 					fixedCIDRV6: "fd1c:f1a0:5d8d:aaaa::/64",
-					expAddrs:    []string{"fd1c:f1a0:5d8d:aaaa::1/64", "fe80::1/64"},
+					expAddrs:    []string{"fd1c:f1a0:5d8d:aaaa::1/64", "fe80::"},
 				},
 				{
 					// Modify that prefix, the default bridge's address must be deleted and re-added.
 					stepName:    "Modify UL prefix - address change",
 					fixedCIDRV6: "fd1c:f1a0:5d8d:bbbb::/64",
-					expAddrs:    []string{"fd1c:f1a0:5d8d:bbbb::1/64", "fe80::1/64"},
+					expAddrs:    []string{"fd1c:f1a0:5d8d:bbbb::1/64", "fe80::"},
 				},
 				{
 					// Modify the prefix length, the default bridge's address should not change.
@@ -500,7 +499,7 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 					fixedCIDRV6: "fd1c:f1a0:5d8d:bbbb::/80",
 					// The prefix length displayed by 'ip a' is not updated - it's informational, and
 					// can't be changed without unnecessarily deleting and re-adding the address.
-					expAddrs: []string{"fd1c:f1a0:5d8d:bbbb::1/64", "fe80::1/64"},
+					expAddrs: []string{"fd1c:f1a0:5d8d:bbbb::1/64", "fe80::"},
 				},
 			},
 		},
@@ -510,14 +509,14 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 				{
 					stepName:    "Standard LL subnet prefix",
 					fixedCIDRV6: "fe80::/64",
-					expAddrs:    []string{"fe80::1/64"},
+					expAddrs:    []string{"fe80::"},
 				},
 				{
 					// Modify that prefix, the default bridge's address must be deleted and re-added.
 					// The bridge must still have an address in the required (standard) LL subnet.
 					stepName:    "Nonstandard LL prefix - address change",
 					fixedCIDRV6: "fe80:1234::/32",
-					expAddrs:    []string{"fe80:1234::1/32", "fe80::1/64"},
+					expAddrs:    []string{"fe80:1234::1/32", "fe80::"},
 				},
 				{
 					// Modify the prefix length, the addresses should not change.
@@ -525,18 +524,28 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 					fixedCIDRV6: "fe80:1234::/64",
 					// The prefix length displayed by 'ip a' is not updated - it's informational, and
 					// can't be changed without unnecessarily deleting and re-adding the address.
-					expAddrs: []string{"fe80:1234::1/", "fe80::1/64"},
+					expAddrs: []string{"fe80:1234::1/", "fe80::"},
 				},
 			},
 		},
 	}
 
+	d := daemon.New(t)
+	defer d.Stop(t)
+	c := d.NewClientT(t)
+
 	for _, tc := range testcases {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, step := range tc.steps {
+		for _, step := range tc.steps {
+			t.Run(tc.name+"/"+step.stepName, func(t *testing.T) {
+				ctx := testutil.StartSpan(ctx, t)
 				// Check that the daemon starts - regression test for:
 				//   https://github.com/moby/moby/issues/46829
-				d.Start(t, "--experimental", "--ipv6", "--ip6tables", "--fixed-cidr-v6="+step.fixedCIDRV6)
+				d.StartWithBusybox(ctx, t, "--ipv6", "--fixed-cidr-v6="+step.fixedCIDRV6)
+
+				// Start a container, so that the bridge is set "up" and gets a kernel_ll address.
+				cID := container.Run(ctx, t, c)
+				defer c.ContainerRemove(ctx, cID, containertypes.RemoveOptions{Force: true})
+
 				d.Stop(t)
 
 				// Check that the expected addresses have been applied to the bridge. (Skip in
@@ -549,8 +558,8 @@ func TestDefaultBridgeAddresses(t *testing.T) {
 						assert.Check(t, is.Contains(stdout, expAddr))
 					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -564,7 +573,7 @@ func TestInternalNwConnectivity(t *testing.T) {
 	ctx := setupTest(t)
 
 	d := daemon.New(t)
-	d.StartWithBusybox(ctx, t, "-D", "--experimental", "--ip6tables")
+	d.StartWithBusybox(ctx, t)
 	defer d.Stop(t)
 
 	c := d.NewClientT(t)
@@ -611,8 +620,8 @@ func TestInternalNwConnectivity(t *testing.T) {
 	assert.Check(t, is.Contains(res.Stderr(), "Network is unreachable"))
 }
 
-// Check that the container's interface has no IPv6 address when IPv6 is
-// disabled in a container via sysctl.
+// Check that the container's interfaces have no IPv6 address when IPv6 is
+// disabled in a container via sysctl (including 'lo').
 func TestDisableIPv6Addrs(t *testing.T) {
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 
@@ -672,6 +681,206 @@ func TestDisableIPv6Addrs(t *testing.T) {
 			} else {
 				assert.Check(t, is.DeepEqual(inet6, []string{}, cmpopts.EquateEmpty()))
 			}
+		})
+	}
+}
+
+// Check that an interface to an '--ipv6=false' network has no IPv6
+// address - either IPAM assigned, or kernel-assigned LL, but the loopback
+// interface does still have an IPv6 address ('::1').
+func TestNonIPv6Network(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+
+	c := d.NewClientT(t)
+	defer c.Close()
+
+	const netName = "testnet"
+	network.CreateNoError(ctx, t, c, netName)
+	defer network.RemoveNoError(ctx, t, c, netName)
+
+	id := container.Run(ctx, t, c, container.WithNetworkMode(netName))
+	defer c.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
+
+	loRes := container.ExecT(ctx, t, c, id, []string{"ip", "a", "show", "dev", "lo"})
+	assert.Check(t, is.Contains(loRes.Combined(), " inet "))
+	assert.Check(t, is.Contains(loRes.Combined(), " inet6 "))
+
+	eth0Res := container.ExecT(ctx, t, c, id, []string{"ip", "a", "show", "dev", "eth0"})
+	assert.Check(t, is.Contains(eth0Res.Combined(), " inet "))
+	assert.Check(t, !strings.Contains(eth0Res.Combined(), " inet6 "),
+		"result.Combined(): %s", eth0Res.Combined())
+
+	sysctlRes := container.ExecT(ctx, t, c, id, []string{"sysctl", "-n", "net.ipv6.conf.eth0.disable_ipv6"})
+	assert.Check(t, is.Equal(strings.TrimSpace(sysctlRes.Combined()), "1"))
+}
+
+// Check that starting the daemon with '--ip6tables=false' means no ip6tables
+// rules get set up for an IPv6 bridge network.
+func TestNoIP6Tables(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+	skip.If(t, testEnv.IsRootless)
+
+	ctx := setupTest(t)
+
+	testcases := []struct {
+		name        string
+		option      string
+		expIPTables bool
+	}{
+		{
+			name:        "ip6tables on",
+			option:      "--ip6tables=true",
+			expIPTables: true,
+		},
+		{
+			name:   "ip6tables off",
+			option: "--ip6tables=false",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+
+			d := daemon.New(t)
+			d.StartWithBusybox(ctx, t, tc.option)
+			defer d.Stop(t)
+
+			c := d.NewClientT(t)
+			defer c.Close()
+
+			const netName = "testnet"
+			const bridgeName = "testbr"
+			const subnet = "fdb3:2511:e851:34a9::/64"
+			network.CreateNoError(ctx, t, c, netName,
+				network.WithIPv6(),
+				network.WithOption("com.docker.network.bridge.name", bridgeName),
+				network.WithIPAM(subnet, "fdb3:2511:e851:34a9::1"),
+			)
+			defer network.RemoveNoError(ctx, t, c, netName)
+
+			id := container.Run(ctx, t, c, container.WithNetworkMode(netName))
+			defer c.ContainerRemove(ctx, id, containertypes.RemoveOptions{Force: true})
+
+			res, err := exec.Command("/usr/sbin/ip6tables-save").CombinedOutput()
+			assert.NilError(t, err)
+			if tc.expIPTables {
+				assert.Check(t, is.Contains(string(res), subnet))
+				assert.Check(t, is.Contains(string(res), bridgeName))
+			} else {
+				assert.Check(t, !strings.Contains(string(res), subnet),
+					fmt.Sprintf("Didn't expect to find '%s' in '%s'", subnet, string(res)))
+				assert.Check(t, !strings.Contains(string(res), bridgeName),
+					fmt.Sprintf("Didn't expect to find '%s' in '%s'", bridgeName, string(res)))
+			}
+		})
+	}
+}
+
+// Test that it's possible to set a sysctl on an interface in the container.
+// Regression test for https://github.com/moby/moby/issues/47619
+func TestSetInterfaceSysctl(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "no sysctl on Windows")
+
+	ctx := setupTest(t)
+	d := daemon.New(t)
+	d.StartWithBusybox(ctx, t)
+	defer d.Stop(t)
+
+	c := d.NewClientT(t)
+	defer c.Close()
+
+	const scName = "net.ipv4.conf.eth0.forwarding"
+	opts := []func(config *container.TestContainerConfig){
+		container.WithCmd("sysctl", scName),
+		container.WithSysctls(map[string]string{scName: "1"}),
+	}
+
+	runRes := container.RunAttach(ctx, t, c, opts...)
+	defer c.ContainerRemove(ctx, runRes.ContainerID,
+		containertypes.RemoveOptions{Force: true},
+	)
+
+	stdout := runRes.Stdout.String()
+	assert.Check(t, is.Contains(stdout, scName))
+}
+
+// With a read-only "/proc/sys/net" filesystem (simulated using env var
+// DOCKER_TEST_RO_DISABLE_IPV6), check that if IPv6 can't be disabled on a
+// container interface, container creation fails - unless the error is ignored by
+// setting env var DOCKER_ALLOW_IPV6_ON_IPV4_INTERFACE=1.
+// Regression test for https://github.com/moby/moby/issues/47751
+func TestReadOnlySlashProc(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+
+	ctx := setupTest(t)
+
+	testcases := []struct {
+		name      string
+		daemonEnv []string
+		expErr    string
+	}{
+		{
+			name: "Normality",
+		},
+		{
+			name: "Read only no workaround",
+			daemonEnv: []string{
+				"DOCKER_TEST_RO_DISABLE_IPV6=1",
+			},
+			expErr: "failed to disable IPv6 on container's interface eth0, set env var DOCKER_ALLOW_IPV6_ON_IPV4_INTERFACE=1 to ignore this error",
+		},
+		{
+			name: "Read only with workaround",
+			daemonEnv: []string{
+				"DOCKER_TEST_RO_DISABLE_IPV6=1",
+				"DOCKER_ALLOW_IPV6_ON_IPV4_INTERFACE=1",
+			},
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := testutil.StartSpan(ctx, t)
+
+			d := daemon.New(t, daemon.WithEnvVars(tc.daemonEnv...))
+			d.StartWithBusybox(ctx, t)
+			defer d.Stop(t)
+			c := d.NewClientT(t)
+
+			const net4Name = "testnet4"
+			network.CreateNoError(ctx, t, c, net4Name)
+			defer network.RemoveNoError(ctx, t, c, net4Name)
+			id4 := container.Create(ctx, t, c,
+				container.WithNetworkMode(net4Name),
+				container.WithCmd("ls"),
+			)
+			defer c.ContainerRemove(ctx, id4, containertypes.RemoveOptions{Force: true})
+			err := c.ContainerStart(ctx, id4, containertypes.StartOptions{})
+			if tc.expErr == "" {
+				assert.Check(t, err)
+			} else {
+				assert.Check(t, is.ErrorContains(err, tc.expErr))
+			}
+
+			// It should always be possible to create a container on an IPv6 network (IPv6
+			// doesn't need to be disabled on the interface).
+			const net6Name = "testnet6"
+			network.CreateNoError(ctx, t, c, net6Name,
+				network.WithIPv6(),
+				network.WithIPAM("fd5c:15e3:0b62:5395::/64", "fd5c:15e3:0b62:5395::1"),
+			)
+			defer network.RemoveNoError(ctx, t, c, net6Name)
+			id6 := container.Run(ctx, t, c,
+				container.WithNetworkMode(net6Name),
+				container.WithCmd("ls"),
+			)
+			defer c.ContainerRemove(ctx, id6, containertypes.RemoveOptions{Force: true})
 		})
 	}
 }

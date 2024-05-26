@@ -4,6 +4,7 @@ package libnetwork
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
 	"net/netip"
 	"os"
@@ -44,10 +45,11 @@ func (sb *Sandbox) finishInitDNS() error {
 func (sb *Sandbox) startResolver(restore bool) {
 	sb.resolverOnce.Do(func() {
 		var err error
-		// The embedded resolver is always started with proxyDNS set as true, even when the sandbox is only attached to
-		// an internal network. This way, it's the driver responsibility to make sure `connect` syscall fails fast when
-		// no external connectivity is available (eg. by not setting a default gateway).
-		sb.resolver = NewResolver(resolverIPSandbox, true, sb)
+		// The resolver is started with proxyDNS=false if the sandbox does not currently
+		// have a gateway. So, if the Sandbox is only connected to an 'internal' network,
+		// it will not forward DNS requests to external resolvers. The resolver's
+		// proxyDNS setting is then updated as network Endpoints are added/removed.
+		sb.resolver = NewResolver(resolverIPSandbox, sb.hasExternalAccess(), sb)
 		defer func() {
 			if err != nil {
 				sb.resolver = nil
@@ -342,9 +344,9 @@ func (sb *Sandbox) rebuildDNS() error {
 		}
 	}
 
-	intNS, err := netip.ParseAddr(sb.resolver.NameServer())
-	if err != nil {
-		return err
+	intNS := sb.resolver.NameServer()
+	if !intNS.IsValid() {
+		return fmt.Errorf("no listen-address for internal resolver")
 	}
 
 	// Work out whether ndots has been set from host config or overrides.

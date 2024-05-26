@@ -12,6 +12,9 @@ import (
 	"github.com/docker/docker/libnetwork/types"
 )
 
+// Linux-specific container configuration flags.
+type containerConfigOS struct{} //nolint:nolintlint,unused // only populated on windows
+
 func releaseOSSboxResources(ns *osl.Namespace, ep *Endpoint) {
 	for _, i := range ns.Interfaces() {
 		// Only remove the interfaces owned by this endpoint from the sandbox.
@@ -90,12 +93,8 @@ func (sb *Sandbox) updateGateway(ep *Endpoint) error {
 		return fmt.Errorf("failed to set gateway while updating gateway: %v", err)
 	}
 
-	// If IPv6 has been disabled in the sandbox a gateway may still have been
-	// configured, don't attempt to apply it.
-	if ipv6, ok := sb.ipv6Enabled(); !ok || ipv6 {
-		if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
-			return fmt.Errorf("failed to set IPv6 gateway while updating gateway: %v", err)
-		}
+	if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
+		return fmt.Errorf("failed to set IPv6 gateway while updating gateway: %v", err)
 	}
 
 	return nil
@@ -162,6 +161,10 @@ func (sb *Sandbox) SetKey(basePath string) error {
 		}
 	}
 
+	// Set up hosts and resolv.conf files. IPv6 support in the container can't be
+	// determined yet, as sysctls haven't been applied by the runtime. Calling
+	// FinishInit after the container task has been created, when sysctls have been
+	// applied will regenerate these files.
 	if err := sb.finishInitDNS(); err != nil {
 		return err
 	}
@@ -173,6 +176,27 @@ func (sb *Sandbox) SetKey(basePath string) error {
 	}
 
 	return nil
+}
+
+// FinishConfig completes Sandbox configuration. If called after the container task has been
+// created, and sysctl settings applied, the configuration will be based on the container's
+// IPv6 support.
+func (sb *Sandbox) FinishConfig() error {
+	if sb.config.useDefaultSandBox {
+		return nil
+	}
+
+	sb.mu.Lock()
+	osSbox := sb.osSbox
+	sb.mu.Unlock()
+	if osSbox == nil {
+		return nil
+	}
+
+	// If sysctl changes have been made, IPv6 may have been enabled/disabled since last checked.
+	osSbox.RefreshIPv6LoEnabled()
+
+	return sb.finishInitDNS()
 }
 
 // IPv6 support can always be determined for host networking. For other network
@@ -283,12 +307,7 @@ func (sb *Sandbox) populateNetworkResources(ep *Endpoint) error {
 
 		ifaceOptions = append(ifaceOptions, osl.WithIPv4Address(i.addr), osl.WithRoutes(i.routes))
 		if i.addrv6 != nil && i.addrv6.IP.To16() != nil {
-			// If IPv6 has been disabled in the Sandbox, an IPv6 address will still have
-			// been allocated. Don't apply it, because doing so would enable IPv6 on the
-			// interface.
-			if ipv6, ok := sb.ipv6Enabled(); !ok || ipv6 {
-				ifaceOptions = append(ifaceOptions, osl.WithIPv6Address(i.addrv6))
-			}
+			ifaceOptions = append(ifaceOptions, osl.WithIPv6Address(i.addrv6))
 		}
 		if len(i.llAddrs) != 0 {
 			ifaceOptions = append(ifaceOptions, osl.WithLinkLocalAddresses(i.llAddrs))

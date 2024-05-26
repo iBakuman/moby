@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/containerd/log"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/internal/sliceutil"
 	"github.com/docker/docker/libnetwork/datastore"
 	"github.com/docker/docker/libnetwork/ipamapi"
@@ -543,6 +544,10 @@ func (ep *Endpoint) sbJoin(sb *Sandbox, options ...EndpointOption) (err error) {
 		return err
 	}
 
+	if err = addEpToResolver(context.TODO(), n.Name(), ep.Name(), &sb.config, ep.iface, n.Resolvers()); err != nil {
+		return errdefs.System(err)
+	}
+
 	if err = n.getController().updateToStore(ep); err != nil {
 		return err
 	}
@@ -569,8 +574,13 @@ func (ep *Endpoint) sbJoin(sb *Sandbox, options ...EndpointOption) (err error) {
 		return sb.setupDefaultGW()
 	}
 
-	moveExtConn := sb.getGatewayEndpoint() != extEp
+	// Enable upstream forwarding if the sandbox gained external connectivity.
+	if sb.resolver != nil {
+		sb.resolver.SetForwardingPolicy(sb.hasExternalAccess())
+	}
 
+	currentExtEp := sb.getGatewayEndpoint()
+	moveExtConn := currentExtEp != extEp
 	if moveExtConn {
 		if extEp != nil {
 			log.G(context.TODO()).Debugf("Revoking external connectivity on endpoint %s (%s)", extEp.Name(), extEp.ID())
@@ -740,6 +750,10 @@ func (ep *Endpoint) sbLeave(sb *Sandbox, force bool) error {
 		log.G(context.TODO()).Warnf("Failed to clean up service info on container %s disconnect: %v", ep.name, err)
 	}
 
+	if err := deleteEpFromResolver(ep.Name(), ep.iface, n.Resolvers()); err != nil {
+		log.G(context.TODO()).Warnf("Failed to clean up resolver info on container %s disconnect: %v", ep.name, err)
+	}
+
 	if err := sb.clearNetworkResources(ep); err != nil {
 		log.G(context.TODO()).Warnf("Failed to clean up network resources on container %s disconnect: %v", ep.name, err)
 	}
@@ -760,6 +774,11 @@ func (ep *Endpoint) sbLeave(sb *Sandbox, force bool) error {
 	sb.deleteHostsEntries(n.getSvcRecords(ep))
 	if !sb.inDelete && sb.needDefaultGW() && sb.getEndpointInGWNetwork() == nil {
 		return sb.setupDefaultGW()
+	}
+
+	// Disable upstream forwarding if the sandbox lost external connectivity.
+	if sb.resolver != nil {
+		sb.resolver.SetForwardingPolicy(sb.hasExternalAccess())
 	}
 
 	// New endpoint providing external connectivity for the sandbox
